@@ -1,0 +1,7 @@
+# Reconstruction evaluation of the autoencoders: the 3072 pinned 16-frame OpenVid-HD windows
+# (manifests/openvid_hd_test.txt), encoded and decoded in one step, in fp32.
+clip_frames: 16
+decode_steps: 1
+batch_size: 16
+num_workers: 8
+seed: 0

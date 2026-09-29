@@ -1,0 +1,47 @@
+[project]
+name = "cadre"
+version = "0.1.0"
+description = "CADRE: autoencoders and world models for interactive video (ICLR 2027)."
+license = "MIT"
+authors = [
+    { name = "Adrien Ramanana Rahary" },
+    { name = "Yutong Bai" },
+    { name = "Nicolas Dufour" },
+    { name = "Patrick Pérez" },
+    { name = "David Picard" },
+]
+requires-python = ">=3.12"
+dependencies = [
+    "torch==2.8.0",
+    "einops>=0.8",
+    "numpy>=2.0",
+    "pydantic>=2.10",
+    "pyyaml>=6.0",
+    "lpips==0.1.4",
+    "torchvision==0.23.0",
+    "scipy>=1.14,<1.18",
+    "pytorch-fid==0.3.0",
+    "cd-fvd==0.1.1",
+    "av==17.0.0",
+    "huggingface-hub>=1.0",
+    "safetensors>=0.6",
+]
+
+[project.optional-dependencies]
+# The interactive demo (demo.py): an ASGI app (starlette) served by uvicorn, whose websocket protocol is websockets.
+demo = ["starlette>=0.40", "uvicorn>=0.30", "websockets>=13"]
+# The data preparation scripts (prepare/): readers of EgoDex's HDF5, ABC-130k's MCAP and PhysicalAI-AV's parquet.
+prepare = ["h5py>=3.16.0", "mcap>=1.5.0", "mcap-protobuf-support>=0.5.4", "pyarrow>=25.0.1"]
+
+[dependency-groups]
+dev = ["ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

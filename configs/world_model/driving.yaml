@@ -1,0 +1,28 @@
+# World model for driving (PhysicalAI-AV: the front wide 120-degree camera), one recipe for every autoencoder.
+environment: driving  # actions: [speed m/s, curvature 1/m] per frame, from the online egomotion
+# The world model z-scores them with these statistics.
+action_mean: [11.27036, 0.00026859]
+action_std: [8.764271, 0.03142159]
+noise_shift: latent_grid  # shift of the flow-time schedule: sqrt(h w C / 4096) of the autoencoder's latent grid
+frames: 80
+psd_fraction: 0.25
+# Optimization, the same in every environment. 100001 steps (0 .. 100000) end with checkpoint-100000.
+steps: 100001
+batch_size: 64
+schedule:
+  lr: 1.0e-4
+  warmup_steps: 1000
+  decay_steps: 0
+betas: [0.9, 0.99]
+weight_decay: 0.1
+grad_clip: 1.0
+ema_decay: 0.9999
+max_wall_hours: null
+seed: 28
+checkpoint_every: 10000
+keep_recent: 1
+keep_every: null
+log_every: 1000
+eval_every: 2000
+num_workers: 24
+compile: true

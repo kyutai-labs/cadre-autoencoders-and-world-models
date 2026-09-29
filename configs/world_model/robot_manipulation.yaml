@@ -1,0 +1,31 @@
+# World model for robot manipulation (ABC: the bimanual YAM arms seen by the top camera), one recipe for every
+# autoencoder.
+environment: robot_manipulation  # actions: 14 joint-state deltas per frame (dataset.ENVIRONMENTS)
+# The world model z-scores them with these per-joint statistics.
+action_mean: [-3.6e-05, -3.0e-06, 1.5e-05, -1.7e-05, -2.4e-05, 0.0, -5.0e-06, 3.5e-05, -1.6e-05, 1.1e-05, -1.5e-05,
+              2.9e-05, -3.0e-06, -1.0e-06]
+action_std: [0.010894, 0.018695, 0.017727, 0.015959, 0.013829, 0.013562, 0.024106, 0.012491, 0.020065, 0.019367,
+             0.017109, 0.015592, 0.015275, 0.025144]
+noise_shift: latent_grid  # shift of the flow-time schedule: sqrt(h w C / 4096) of the autoencoder's latent grid
+frames: 80
+psd_fraction: 0.25
+# Optimization, the same in every environment. 100001 steps (0 .. 100000) end with checkpoint-100000.
+steps: 100001
+batch_size: 64
+schedule:
+  lr: 1.0e-4
+  warmup_steps: 1000
+  decay_steps: 0
+betas: [0.9, 0.99]
+weight_decay: 0.1
+grad_clip: 1.0
+ema_decay: 0.9999
+max_wall_hours: null
+seed: 28
+checkpoint_every: 10000
+keep_recent: 1
+keep_every: null
+log_every: 1000
+eval_every: 2000
+num_workers: 24
+compile: true

@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this code or these models, please cite the paper below."
+title: "CADRE"
+license: MIT
+authors:
+  - family-names: "Ramanana Rahary"
+    given-names: "Adrien"
+    affiliation: "Kyutai; École Nationale des Ponts et Chaussées"
+  - family-names: "Bai"
+    given-names: "Yutong"
+    affiliation: "BAIR, UC Berkeley"
+  - family-names: "Dufour"
+    given-names: "Nicolas"
+    affiliation: "Kyutai"
+  - family-names: "Pérez"
+    given-names: "Patrick"
+    affiliation: "Kyutai (work done while at Kyutai)"
+  - family-names: "Picard"
+    given-names: "David"
+    affiliation: "École Nationale des Ponts et Chaussées"
+preferred-citation:
+  type: conference-paper
+  title: "Rethinking Video Autoencoders for Interactive World Models"
+  authors:
+    - family-names: "Ramanana Rahary"
+      given-names: "Adrien"
+    - family-names: "Bai"
+      given-names: "Yutong"
+    - family-names: "Dufour"
+      given-names: "Nicolas"
+    - family-names: "Pérez"
+      given-names: "Patrick"
+    - family-names: "Picard"
+      given-names: "David"
+  year: 2026

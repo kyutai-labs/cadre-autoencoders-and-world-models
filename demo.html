@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CADRE world models</title>
+<link rel="preconnect" href="https://api.fontshare.com">
+<link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap">
+<style>
+:root {
+  --bg: #121212; --surface: #191919; --raised: #232323; --line: #343434;
+  --text: #EFEFEF; --muted: #9d9d9d; --dim: #656565;
+  --green: #39F2AE; --orange: #f5ab4a; --pink: #f051db;
+  --smallcaps: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color-scheme: dark;
+  font-family: 'Satoshi', 'Satoshi-Variable', system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-weight: 500; line-height: 1.45; color: var(--text); background: var(--bg);
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+/* The page fits the window and never scrolls: the video takes the room the rest leaves (fitStage). */
+html, body { height: 100%; overflow: hidden; }
+body { margin: 0; display: flex; flex-direction: column; background: var(--bg); }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.sc { font-family: var(--smallcaps); font-variant: small-caps; text-transform: lowercase; letter-spacing: .03em; }
+
+/* nav */
+nav { flex: none; height: 52px; display: flex; align-items: center; gap: 18px;
+  padding: 0 28px; background: var(--bg); border-bottom: 1px solid var(--line); }
+nav .logo { display: flex; line-height: 0; opacity: .9; }
+nav .logo:hover { opacity: 1; }
+nav .logo svg { height: 19px; width: auto; }
+/* ENPC's mark (Wikipedia's Logo-ENPC-IP-RVB.png, traced; grey made white, its blue kept, triangle beside the text):
+   "PONTS" as tall as Kyutai's x-height, the last line on Kyutai's baseline (4.3 px above its box, the y's tail). */
+nav .logos { display: flex; align-items: flex-end; gap: 16px; }
+nav .logo.enpc { padding-left: 16px; border-left: 1px solid var(--line); padding-bottom: 4.3px; }
+nav .logo.enpc svg { height: 29.5px; }
+nav .brand { font-weight: 700; font-size: 17px; letter-spacing: .01em; padding-left: 18px; border-left: 1px solid var(--line); }
+nav .brand span { color: var(--muted); font-weight: 500; }
+nav .spacer { flex: 1; }
+.readout { background: none; border: 0; padding: 0; font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; cursor: default; }
+.readout.slow { color: var(--orange); }
+.readout.lost { color: var(--pink); cursor: pointer; }
+
+main { flex: 1; min-height: 0; width: 100%; max-width: 1760px; margin: 0 auto; padding: 14px 28px 18px;
+  display: flex; flex-direction: column; }
+
+/* environment tabs */
+.tabs { flex: none; display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.tab { position: relative; z-index: 0; background: none; border: 0; padding: 7px 18px; cursor: pointer;
+  color: var(--muted); font-size: 16px; }
+.tab::after { content: ''; position: absolute; inset: 0; z-index: -1; border: 1px solid var(--line);
+  transform: skewX(-10deg); background: var(--surface); transition: border-color .2s, background .2s; }
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: #000; }
+.tab[aria-selected="true"]::after { background: var(--green); border-color: var(--green); }
+.tab .num { font-size: 11px; opacity: .55; margin-left: 6px; }
+
+.layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 24vw, 320px);
+  gap: 22px; }
+.video { min-height: 0; }
+
+/* video */
+.stage { position: relative; background: #000; border: 1px solid var(--line); aspect-ratio: 16 / 9; outline: none;
+  max-width: 100%; }
+.stage.look { cursor: crosshair; }
+.stage canvas { display: block; width: 100%; height: 100%; }
+.stage canvas.ribbon { position: absolute; inset: 0; pointer-events: none; }
+.pill { position: absolute; left: 12px; top: 10px; padding: 2px 10px; border-radius: 999px; font-size: 13px;
+  pointer-events: none; background: rgba(18,18,18,.78); border: 1px solid currentColor; }
+/* The mode badge: a dark glass pill, legible on bright and dark frames alike. */
+.badge { background: rgba(10,10,10,.72); backdrop-filter: blur(4px); letter-spacing: .08em; font-weight: 600; }
+.badge.interactive { color: var(--green); }
+.badge.replay { color: var(--orange); }
+.badge.ended { color: var(--orange); border-style: dashed; }
+.loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 15px;
+  pointer-events: none; }
+
+/* key strip */
+.keys { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-top: 12px; padding: 12px 14px; background: var(--surface);
+  border: 1px solid var(--line); min-height: 54px; align-items: center; }
+.keygroup { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; color: var(--muted); }
+.keygroup .what { margin-left: 4px; }
+kbd { display: inline-grid; place-items: center; min-width: 30px; height: 30px; padding: 0 7px;
+  font: 700 14px/1 'Satoshi', system-ui, sans-serif; color: var(--text); background: var(--raised);
+  border: 1px solid #4a4a4a; border-bottom-width: 3px; border-radius: 5px;
+  transition: background .06s, color .06s, border-color .06s; }
+kbd.wide { min-width: 52px; font-size: 12px; }
+kbd.down { background: var(--green); color: #000; border-color: var(--green); }
+.keys .general { margin-left: auto; gap: 14px; }
+.keys .general .keygroup { gap: 4px; }
+
+/* side panel */
+.panel { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.card { background: var(--surface); border: 1px solid var(--line); padding: 13px 16px; }
+.row { display: flex; gap: 8px; margin-top: 12px; }
+.seg { display: flex; border: 1px solid var(--line); }
+.seg button { flex: 1; background: none; border: 0; padding: 7px 10px; cursor: pointer; color: var(--muted); font-size: 15px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--raised); color: var(--green); }
+.btn { position: relative; z-index: 0; flex: 1; background: none; border: 0; padding: 8px 12px; cursor: pointer; font-size: 15px; color: #000; }
+.btn::after { content: ''; position: absolute; inset: 0; z-index: -1; transform: skewX(-10deg); background: var(--green);
+  border: 1px solid var(--green); transition: background .2s; }
+.btn:hover::after { background: #6ff7c5; }
+.btn.ghost { color: var(--text); }
+.btn.ghost::after { background: var(--surface); border: 1px dashed var(--text); }
+.btn.ghost:hover::after { background: var(--raised); }
+.slider { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; margin-top: 10px; font-size: 14px; }
+.slider:first-of-type { margin-top: 0; }
+.slider label { color: var(--muted); }
+.slider output { font-variant-numeric: tabular-nums; }
+.slider input { grid-column: 1 / -1; width: 100%; accent-color: var(--green); }
+
+/* environment controls */
+.arm { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.arm + .arm { margin-top: 8px; }
+.arm .name { width: 30px; color: var(--muted); }
+.chips { display: flex; gap: 3px; }
+.chip { background: var(--raised); border: 1px solid var(--line); color: var(--muted); padding: 2px 6px; font-size: 13px; cursor: pointer; border-radius: 3px; }
+.chip.base { cursor: default; border-style: dashed; }
+.chip[aria-pressed="true"] { color: var(--text); border-color: var(--green); }
+.chip.moving { background: var(--green); color: #000; border-color: var(--green); }
+.vehicle { display: flex; align-items: baseline; justify-content: space-between; }
+.speed { display: flex; align-items: baseline; gap: 8px; }
+.speed .v { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.speed .u { color: var(--muted); font-size: 14px; }
+.toggle { background: none; border: 1px solid var(--line); padding: 3px 10px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.toggle[aria-pressed="true"] { color: var(--green); border-color: var(--green); }
+.gauge { position: relative; height: 14px; margin-top: 10px; background: var(--raised); border: 1px solid var(--line); }
+.gauge .envelope { position: absolute; top: 0; bottom: 0; background: rgba(57,242,174,.12); border-left: 1px solid var(--green); border-right: 1px solid var(--green); }
+.gauge .center { position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--muted); }
+.gauge .needle { position: absolute; top: -4px; bottom: -4px; width: 3px; margin-left: -1px; background: var(--orange); }
+</style>
+</head>
+<body>
+<nav>
+  <div class="logos">
+    <a class="logo" href="https://kyutai.org" aria-label="Kyutai">
+      <svg viewBox="0 0 404 100" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M87.6523 0V43.6577L110.701 22.3145L130.812 22.3914L106.685 45.748L131.549 77.3737H112.076L96.169 55.8026L87.6523 64.0108V77.3738H71.2975V0H87.6523Z" fill="white"/>
+        <path d="M142.846 99.1588V86.2573H163.993L167.408 77.3737H158.11L139.601 22.3052H156.387L170.829 65.5661L185.231 22.3052H200.726L181.949 77.9626C177.916 90.3362 174.514 93.6753 171.438 95.5793C168.815 97.203 165.85 98.1806 162.794 98.6082C158.874 99.1568 152.569 99.5786 142.846 99.1588Z" fill="white"/>
+        <path d="M226.667 77.0233C208.346 74.6534 209.535 54.2897 209.535 54.2897L209.526 22.2217H226.098L226.107 51.5359C226.107 51.5359 224.755 63.6657 235.964 63.8976C249.181 64.1711 249.563 49.3107 249.563 49.3107L249.555 22.2216H266.126L266.135 77.3736H249.637V65.0825C249.637 65.0825 245.067 79.4033 226.667 77.0233Z" fill="white"/>
+        <path d="M284.816 57.8514V34.9494H274.928V27.0264L286.022 22.3053L292.796 9.61548H301.184L301.232 22.3053H316.91L316.911 34.9494H301.142V64.3056L315.362 64.3968V77.3738H299.703C291.689 77.3738 285.137 70.9807 284.941 62.9686L284.816 57.8514Z" fill="white"/>
+        <path d="M387.007 13.6483V3.68011H403.149V13.6483H387.007ZM403.149 22.4411V77.3737H387.007V22.4411H403.149Z" fill="white"/>
+        <path d="M377.384 57.3516L377.335 39.3645C377.334 39.099 377.341 38.8336 377.348 38.5682C377.413 36.0562 376.928 19.3098 352.384 19.3105C325.098 19.3111 325.76 38.882 325.76 38.882H341.673C341.717 29.7133 352.384 30.4186 352.384 30.4186C352.384 30.4186 361.905 29.8895 362.302 35.62C362.699 41.3503 359.502 41.5745 354.809 42.3641C347.164 43.6506 347.976 42.849 335.457 46.2433C322.939 49.6373 324.658 63.4345 324.658 63.4345C324.658 63.4345 325.539 77.8046 343.48 77.3637C361.421 76.923 363.096 63.6989 363.096 63.6989C362.743 65.8149 364.021 77.3736 364.021 77.3736H378.214C377.333 75.2756 377.384 57.3516 377.384 57.3516ZM352.517 65.7708C352.517 65.7708 343.26 68.5037 340.835 61.7596C339.259 57.3758 342.284 54.8172 344.594 53.5632C345.667 52.9806 346.838 52.6078 348.038 52.3778C351.251 51.7618 360.154 49.8613 362.346 47.3455C362.346 47.3455 363.977 62.7293 352.517 65.7708Z" fill="white"/>
+        <path d="M37.1019 0.0418091C40.2319 0.0418091 42.3063 3.28791 40.9914 6.12841L9.18073 74.8464C8.47913 76.3619 6.96123 77.3319 5.29123 77.3319C2.16123 77.3319 0.0868254 74.0858 1.40173 71.2453L33.2124 2.52731C33.914 1.01181 35.4319 0.0418091 37.1019 0.0418091Z" fill="#39F2AE"/>
+      </svg>
+    </a>
+    <a class="logo enpc" href="https://www.ecoledesponts.fr" aria-label="École nationale des ponts et chaussées"><svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" viewBox="0 0 970 292"><path fill="#fff" transform="scale(0.59959) translate(-11 -9)" d="M11 496C11 496 71 392 144 265C217 138 281 29 284 22C288 15 292 10 293 10C293 10 574 495 574 496C574 497 447 497 292 497C138 497 11 497 11 496ZM145 471C142 465 100 396 99 396C99 395 89 411 78 430C67 450 57 467 56 469L54 472L100 472C137 472 146 472 145 471ZM267 467C258 453 224 392 223 392C220 397 175 471 175 471C175 472 196 472 222 472L269 472L267 467ZM410 471C409 468 363 393 363 393C362 393 353 408 343 427C332 446 322 464 320 467L317 472L364 472C401 472 411 472 410 471ZM453 428L480 384L452 384C437 384 413 384 398 384L371 384L398 428C413 452 426 472 426 472C426 471 438 452 453 428ZM527 465C516 445 487 396 487 396C487 396 453 450 442 468L440 472L486 472L531 472L527 465ZM188 427L215 384L161 383C131 383 106 383 106 383C106 384 159 471 160 471C161 471 173 451 188 427ZM350 368C380 315 404 273 404 272C403 272 354 272 293 272L182 272L235 364C264 414 288 458 290 461C293 466 293 466 294 465C295 463 320 420 350 368ZM473 371C473 371 425 288 424 287C424 286 375 370 375 371C375 372 397 372 424 372C451 372 473 372 473 371ZM211 370C210 368 162 285 162 285C162 285 156 296 148 308C141 321 130 340 124 351L112 371L162 371C192 371 211 371 211 370ZM278 246C277 245 266 227 254 206C241 186 230 169 230 169C230 168 224 178 217 190C210 202 199 220 194 230L183 248L231 248L279 248L278 246ZM399 243C398 241 388 223 376 204C366 185 356 169 356 169C355 169 307 247 307 248C307 248 328 248 355 248L402 248L399 243ZM321 202C335 179 347 160 347 159C347 159 323 159 293 159C263 159 239 159 239 160C239 160 251 180 266 204C286 236 293 247 294 246C294 245 307 225 321 202ZM343 146C343 146 294 61 293 60C292 59 242 145 242 147C242 147 265 147 292 147C320 147 343 147 343 146Z"/><path fill="#fff" transform="translate(398.0 -549)" d="M108 841C102 840 95 836 92 832C87 826 86 820 86 809C86 797 88 790 94 783C100 776 106 774 117 774C122 774 127 774 128 774C131 775 131 775 130 781C130 784 130 787 130 787C130 787 127 786 123 786C114 784 110 785 105 790C100 795 99 801 99 811C100 818 102 824 107 827C110 829 112 829 117 829C121 829 125 829 127 828C128 827 129 827 130 827C130 828 130 830 131 833L131 839L127 840C122 841 113 842 108 841ZM289 841C280 839 275 834 273 826C273 824 272 811 272 798L272 774L278 774L285 774L285 798C285 825 285 826 291 829C298 833 308 830 310 824C310 822 311 812 311 797L311 774L317 774L323 774L323 798C323 813 323 824 322 826C320 831 316 836 311 839C305 841 295 842 289 841ZM342 841C340 841 338 840 338 840C338 840 338 837 338 834C338 829 338 828 340 829C341 829 345 829 349 830C356 830 357 830 359 828C361 826 362 825 362 822C362 817 361 816 351 812C340 807 336 802 336 793C336 780 345 773 361 773C371 773 372 773 372 777C372 785 372 785 363 784C355 784 354 784 352 786C346 792 349 796 361 802C371 806 375 810 376 817C377 826 372 835 363 839C358 841 347 842 342 841ZM392 841C390 841 388 840 387 840C387 839 387 837 387 834C388 828 388 828 391 829C392 829 397 830 401 830C407 830 408 829 410 827C412 825 413 821 411 818C410 817 406 814 400 811C389 806 386 802 386 793C386 784 390 778 399 775C403 773 419 772 421 774C421 774 422 776 421 780L421 785L412 784C405 784 404 784 402 786C398 789 398 793 401 796C402 797 407 800 412 802C422 807 426 811 425 820C425 829 421 836 412 840C408 841 397 842 392 841ZM539 841C537 841 535 840 535 840C534 840 534 837 535 834C535 829 536 828 537 829C538 829 542 829 546 830C553 830 554 830 556 828C558 826 559 825 559 822C559 817 558 816 548 812C540 808 535 803 533 798C533 797 533 793 533 791C534 779 543 773 558 773C562 773 567 773 567 774C569 774 569 777 568 782L568 785L559 784C552 784 551 784 549 786C545 789 545 793 548 796C549 797 554 800 558 802C567 806 569 807 571 812C576 822 571 834 560 839C555 841 545 842 539 841ZM9 821L9 800L19 800L29 800L29 802C29 805 29 805 22 805L14 805L14 811L14 817L21 817C28 817 28 817 28 820C28 822 28 822 21 822L14 822L14 829L14 836L22 836C29 836 29 836 29 838C29 840 28 841 19 841L9 841L9 821ZM46 823L46 805L40 805C35 805 35 805 35 802L35 800L49 800C62 800 63 801 63 803C63 805 63 805 57 805L51 805L51 823L51 841L48 841L46 841L46 823ZM144 808L144 774L150 774L157 774L157 787L157 800L170 800L183 800L183 787L183 774L190 774L196 774L196 807L196 840L189 841L183 841L183 827L183 812L170 812L157 812L157 826L156 840L150 841L144 841L144 808ZM205 840C205 839 210 824 216 806L226 774L234 774C238 774 241 774 241 774C241 774 246 789 252 807C258 825 263 840 263 840C263 841 260 841 256 841L250 840L247 834L245 828L233 827L221 827L219 834L217 841L211 841C207 841 205 841 205 840ZM438 808L438 774L456 774L473 774L473 780L473 785L462 785L451 785L451 793L451 801L462 801L472 801L472 806L472 812L461 812L451 812L451 821L451 829L462 829L473 829L473 835L473 841L456 841L438 841L438 808ZM487 808L487 774L504 774L522 774L522 780L522 785L510 785L499 785L499 793L499 801L510 801L521 801L521 806L520 812L510 812L499 812L499 821L499 829L510 829L522 830L522 835L522 840L504 841L487 841L487 808ZM238 804C235 797 233 791 233 792C233 792 225 815 225 816C225 816 229 816 233 816L242 816L238 804ZM449 766C448 764 447 763 447 762C447 762 461 753 463 752C464 752 468 758 468 760C468 761 464 763 459 765L451 770L449 766ZM156 739C131 735 118 719 118 690C118 675 121 664 129 654C140 640 162 633 181 637C203 642 215 657 217 681C219 707 205 730 182 737C175 739 163 740 156 739ZM519 739C508 738 509 738 509 728C509 724 510 720 510 720C510 719 513 720 517 721C524 722 538 722 543 721C550 717 552 707 546 702C544 700 540 698 536 696C512 687 506 681 506 666C506 647 524 635 552 636C557 637 563 637 564 638C565 638 565 640 565 646C565 650 564 654 564 654C564 655 561 654 559 654C552 652 538 652 534 654C530 656 528 660 528 665C528 670 533 674 550 680C568 687 575 700 571 715C565 733 545 742 519 739ZM10 688L10 638L15 638C23 637 45 637 52 638C70 642 78 652 78 668C78 675 78 678 76 682C70 695 55 703 38 703L31 703L31 720L31 738L20 738L10 738L10 688ZM262 688L262 638L276 638L290 638L304 663C313 676 322 692 325 697C327 702 330 706 330 706C330 707 330 691 330 672L330 638L340 638L350 638L350 688L350 738L337 738L323 738L306 709C296 693 287 678 285 674L282 668L282 703L282 738L272 738L262 738L262 688ZM420 696L420 655L406 655L393 655L393 646L393 638L431 638L468 638L468 646L468 654L454 655L440 655L440 697L440 738L430 738L420 738L420 696ZM177 720C190 714 197 698 194 680C192 663 183 654 168 654C148 654 137 670 140 695C142 709 148 718 159 721C164 722 172 722 177 720ZM50 683C55 680 57 676 57 669C57 659 51 654 38 654L32 654L31 669C31 677 31 685 31 686C32 688 44 687 50 683ZM45 601C39 598 36 592 36 584C36 571 41 564 50 562C55 561 63 562 63 563C63 564 63 565 63 566C63 567 62 568 57 567C46 567 42 571 42 583C42 594 48 599 60 597C64 596 64 596 64 598C64 600 63 601 60 602C54 604 50 603 45 601ZM77 601C72 598 69 593 68 586C67 570 78 558 91 562C97 563 101 567 103 573C104 580 104 583 103 590C99 601 88 606 77 601ZM304 602C298 599 295 592 295 583C295 571 301 563 312 561C319 561 325 564 328 570C332 578 331 591 325 597C321 602 311 604 304 602ZM484 602C483 602 483 597 483 582L483 562L493 562C502 562 504 563 507 565C511 568 514 574 514 581C514 595 507 602 493 603C489 603 485 603 484 602ZM552 602C551 602 550 601 550 599C550 597 550 597 556 598C561 598 562 598 564 596C569 591 567 587 558 584C552 581 550 578 550 573C550 571 550 568 551 567C554 563 561 561 566 561C570 562 571 562 570 565C570 567 569 567 566 566C562 566 558 567 556 569C554 573 555 576 562 579C566 581 569 583 570 584C574 588 573 596 568 600C565 602 556 604 552 602ZM9 582L9 562L19 562L29 562L29 564C29 567 29 567 22 567L14 567L14 573L14 579L21 579C28 579 28 579 28 582C28 584 28 584 21 584L14 584L14 590L14 597L21 597C28 597 29 598 29 600C29 602 29 602 19 602L9 602L9 582ZM111 582L111 562L114 562L117 562L117 579L117 597L124 597C130 597 131 598 131 600C131 602 131 602 121 602L111 602L111 582ZM137 582L137 562L147 562L157 562L157 564C157 567 157 567 150 567L142 567L142 573L142 579L149 579C156 579 156 579 156 582C156 584 156 584 149 584L142 584L142 590L142 597L149 597C156 597 157 598 157 600C157 602 157 602 147 602L137 602L137 582ZM179 582L179 562L183 562L187 562L196 578L205 593L205 578L205 562L208 562L210 562L210 582L210 602L206 602L202 602L194 588C190 580 186 573 186 572C185 571 185 576 185 586L185 602L182 602L179 602L179 582ZM223 582L230 562L233 562L236 562L243 580C246 590 249 599 250 600C250 602 250 602 247 602C244 602 243 601 242 597L241 593L233 593L225 594L223 598C222 601 221 602 219 602L216 602L223 582ZM259 584L259 567L254 567C248 567 248 567 248 564L248 562L262 562L276 562L276 564C276 567 276 567 270 567L265 567L265 584L265 602L262 602L259 602L259 584ZM281 582L281 562L284 562L287 562L287 582L287 602L284 602L281 602L281 582ZM338 582L338 562L342 562L346 562L355 578L364 593L364 578L364 562L366 562L369 562L369 582L369 602L365 602L362 602L354 588C349 580 345 573 344 572C344 571 344 576 344 586L344 602L341 602L338 602L338 582ZM382 582L389 562L392 562L395 562L402 582C406 593 409 602 409 602C409 602 408 602 406 602C403 602 402 601 401 597L400 593L392 593L384 594L382 598C381 601 380 602 378 602L375 602L382 582ZM415 582L415 562L418 562L421 562L421 580L421 597L428 597C434 597 434 597 434 600C434 602 434 602 424 602L415 602L415 582ZM440 582L440 562L450 562L460 562L460 564C460 567 460 567 453 567L446 567L446 573L446 579L453 579C459 579 460 580 460 582C460 583 459 584 453 584L446 584L446 591L446 597L453 597C460 597 460 597 460 600L460 602L450 602L440 602L440 582ZM522 582L522 562L532 562L542 562L542 564C542 567 542 567 535 567L528 567L528 573L528 579L535 579C541 579 542 580 542 582C542 583 541 584 535 584L528 584L528 591L528 597L535 597C542 597 542 597 542 600L542 602L532 602L522 602L522 582ZM90 596C95 594 97 590 97 582C97 572 94 567 86 567C82 567 78 569 76 573C72 581 74 592 80 596C84 598 86 599 90 596ZM318 596C323 593 324 589 324 580C323 574 323 573 320 570C315 564 305 566 302 574C300 579 301 588 303 592C307 598 312 599 318 596ZM501 596C506 594 507 590 508 583C508 572 504 567 494 567L488 567L488 582C488 595 488 597 490 597C492 598 499 597 501 596ZM239 588C239 587 234 573 233 571C233 570 227 585 227 587C227 588 230 588 233 588C236 588 239 588 239 588ZM398 588C398 587 393 573 392 571C392 570 386 585 386 587C386 588 389 588 392 588C395 588 398 588 398 588ZM16 557C15 555 22 549 24 550C26 552 25 553 21 556C16 559 16 560 16 557Z"/></svg></a>
+  </div>
+  <div class="brand">CADRE <span>world models</span></div>
+  <div class="spacer"></div>
+  <button class="readout sc" id="readout" type="button">connecting</button>
+</nav>
+
+<main>
+  <div class="tabs" role="tablist" id="tabs" aria-label="environment"></div>
+  <div class="layout">
+    <section class="video" id="video">
+      <div class="stage" id="stage" tabindex="0" aria-label="world model video">
+        <canvas id="screen" width="512" height="288"></canvas>
+        <canvas id="ribbon" class="ribbon" width="512" height="288" aria-hidden="true"></canvas>
+        <span class="pill badge sc" id="badge" hidden></span>
+        <div class="loading sc" id="loading">connecting</div>
+      </div>
+      <div class="keys" id="keys" aria-label="keys"></div>
+    </section>
+
+    <aside class="panel">
+      <div class="card">
+        <div class="seg" id="modes" role="group" aria-label="action source"></div>
+        <div class="row">
+          <button class="btn sc" id="newprompt" title="n">new prompt</button>
+        </div>
+      </div>
+      <div class="card" id="hudcard" hidden><div id="hud"></div></div>
+      <div class="card">
+        <div class="slider">
+          <label class="sc" for="steps">denoise steps</label><output id="stepsv"></output>
+          <input type="range" id="steps" min="1" max="10" step="1">
+        </div>
+        <div class="slider">
+          <label class="sc" for="noise">context noise</label><output id="noisev"></output>
+          <input type="range" id="noise" min="0" max="0.5" step="0.05">
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const KEY_LABELS = { Shift: "shift", Space: "space" };
+// Space toggles the mode: replay plays the prompt clip's recording from its start, interactive takes over from the
+// frame on screen (also when a replay has ended).
+
+
+let socket = null, hello = null, envs = {}, current = null, info = null;
+let held = new Set();  // the environment's keys, sent to the server
+const lit = new Set();  // every key of the strip that is down
+let drawing = Promise.resolve(), chunkEnv = null;
+const shown = [];  // display times of the last frames, for the fps readout
+let latency = null;
+const ctx = $("screen").getContext("2d");
+const rctx = $("ribbon").getContext("2d");
+let ribbonOn = true, ribbon = [];
+const look = { x: 0, y: 0, drag: false, dragging: false };  // mouse motion not yet sent
+
+function label(code) {
+  return KEY_LABELS[code] || code.replace(/^Key/, "").replace(/^Digit/, "");
+}
+function send(message) {
+  if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+}
+
+// --- connection ---
+function connect() {
+  setReadout("connecting", "");
+  socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  socket.binaryType = "arraybuffer";
+  socket.onmessage = (event) => {
+    if (typeof event.data === "string") onText(JSON.parse(event.data));
+    else onFrame(event.data);
+  };
+  socket.onclose = (event) => {
+    setReadout(event.code === 4000 ? "another viewer took over" : "disconnected: reconnect", "lost");
+  };
+}
+function setReadout(text, cls) {
+  $("readout").className = "readout sc " + cls;
+  $("readout").textContent = text;
+}
+$("readout").addEventListener("click", () => { if (!socket || socket.readyState === WebSocket.CLOSED) connect(); });
+
+function onText(message) {
+  if (message.type === "hello") {
+    hello = message;
+    envs = Object.fromEntries(message.envs.map((e) => [e.name, e]));
+    $("steps").value = message.denoise_steps;
+    $("noise").value = message.context_noise;
+    showSettings();
+    buildTabs();
+    selectEnv(message.env, false);
+    setReadout("live", "");
+  } else if (message.type === "state") {
+    applyInfo(message);
+  }
+}
+
+function onFrame(buffer) {
+  const size = new DataView(buffer).getUint32(0, true);
+  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, size)));
+  if (header.i === 0) chunkEnv = header.env;
+  if (chunkEnv !== current) return;  // still in flight from the environment we left
+  const blob = new Blob([new Uint8Array(buffer, 4 + size)], { type: "image/jpeg" });
+  drawing = drawing.then(() => createImageBitmap(blob)).then((bitmap) => {
+    ctx.drawImage(bitmap, 0, 0, 512, 288);
+    bitmap.close();
+    const now = performance.now();
+    shown.push(now);
+    while (shown.length > 40 || now - shown[0] > 2000) shown.shift();
+    if (header.i === 0) applyInfo(header);
+    $("loading").hidden = true;
+  }).catch(() => {});
+}
+
+// --- environment ---
+function buildTabs() {
+  const tabs = $("tabs");
+  tabs.textContent = "";
+  hello.envs.forEach((env, i) => {
+    const tab = document.createElement("button");
+    tab.className = "tab sc";
+    tab.setAttribute("role", "tab");
+    tab.dataset.env = env.name;
+    tab.innerHTML = `${env.title}<span class="num">${i + 1}</span>`;
+    tab.addEventListener("click", () => selectEnv(env.name, true));
+    tabs.appendChild(tab);
+  });
+}
+
+function selectEnv(name, notify) {
+  if (!envs[name]) return;
+  releaseKeys();
+  current = name;
+  const env = envs[name];
+  for (const tab of $("tabs").children) tab.setAttribute("aria-selected", String(tab.dataset.env === name));
+  const modes = $("modes");
+  modes.textContent = "";
+  for (const mode of env.modes) {
+    const b = document.createElement("button");
+    b.className = "sc";
+    b.dataset.mode = mode;
+    b.textContent = mode;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", () => setMode(mode));
+    modes.appendChild(b);
+  }
+  $("stage").classList.toggle("look", env.look);
+  if (!env.look && document.pointerLockElement) document.exitPointerLock();
+  buildKeys(env);
+  buildHud(env);
+  ribbon = [];
+  drawRibbon();
+  if (notify) {
+    info = null;
+    $("badge").hidden = true;
+    $("loading").hidden = false;
+    $("loading").textContent = "switching";
+    send({ type: "env", env: name });
+  }
+}
+
+function keycaps(codes) {
+  return codes.map((c) => `<kbd data-code="${c}"${label(c).length > 1 ? ' class="wide"' : ""}>${label(c)}</kbd>`).join("");
+}
+function keygroup(caps, what) {
+  return `<span class="keygroup">${caps}<span class="what sc">${what}</span></span>`;
+}
+function globalKeys() {
+  const digits = hello.envs.map((_, i) => `Digit${i + 1}`);
+  return [[digits, "environment"], [["KeyN"], "new prompt"], [["Space"], "interactive / replay"]];
+}
+function buildKeys(env) {
+  const groups = env.hints.map(([codes, what]) => keygroup(keycaps(codes), what));
+  if (env.look) groups.push(keygroup(`<kbd class="wide">mouse</kbd>`, "look"));
+  const general = globalKeys().map(([codes, what]) => keygroup(keycaps(codes), what));
+  $("keys").innerHTML = groups.join("") + `<span class="keygroup general">${general.join("")}</span>`;
+  markKeys();
+}
+function markKeys() {
+  for (const kbd of $("keys").querySelectorAll("kbd[data-code]")) kbd.classList.toggle("down", lit.has(kbd.dataset.code));
+}
+
+function buildHud(env) {
+  const hud = $("hud");
+  $("hudcard").hidden = !["robot_manipulation", "driving"].includes(env.name);
+  if (env.name === "robot_manipulation") {
+    hud.innerHTML = ["left", "right"].map((arm) => `<div class="arm"><span class="name sc">${arm}</span><div class="chips">` +
+      `<span class="chip base" data-dim="0">J0</span>` +
+      env.joints.map((j, i) => `<button class="chip" data-arm="${arm}" data-joint="${i + 1}" aria-pressed="false">${j}</button>`).join("") +
+      `</div></div>`).join("");
+    for (const chip of hud.querySelectorAll("button.chip")) {
+      chip.addEventListener("click", () => send({ type: "joint", arm: chip.dataset.arm, joint: Number(chip.dataset.joint) }));
+    }
+  } else if (env.name === "driving") {
+    hud.innerHTML = `<div class="vehicle"><div class="speed"><span class="v" id="kmh">0</span><span class="u">km/h</span></div>
+      <button class="toggle sc" id="ribbontoggle" aria-pressed="${ribbonOn}">path</button></div>
+      <div class="gauge" aria-label="curvature"><div class="envelope" id="envelope"></div><div class="center"></div><div class="needle" id="needle"></div></div>`;
+    $("ribbontoggle").addEventListener("click", () => {
+      ribbonOn = !ribbonOn;
+      $("ribbontoggle").setAttribute("aria-pressed", String(ribbonOn));
+      drawRibbon();
+    });
+  } else {
+    hud.innerHTML = "";
+  }
+}
+
+function applyInfo(message) {
+  if (!message.env || message.env !== current) return;
+  info = message;
+  const badge = $("badge");
+  badge.hidden = false;
+  badge.className = `pill badge sc ${message.ended ? "ended" : message.mode}`;
+  badge.textContent = message.ended ? "replay ended" : message.mode;
+  if (message.latency_ms) latency = message.latency_ms;
+  const fps = shown.length > 1 ? 1000 * (shown.length - 1) / (shown[shown.length - 1] - shown[0]) : 0;
+  const text = `${fps ? fps.toFixed(1) : "–"} fps` + (latency ? ` · ${latency.toFixed(0)} ms latency` : "");
+  setReadout(text, fps && fps < hello.fps * 0.95 ? "slow" : "");
+  for (const b of $("modes").children) b.setAttribute("aria-pressed", String(b.dataset.mode === message.mode));
+  updateHud(message.hud || {});
+}
+
+function updateHud(hud) {
+  if (current === "robot_manipulation" && hud.selected) {
+    for (const chip of $("hud").querySelectorAll("button.chip")) {
+      const arm = chip.dataset.arm, joint = Number(chip.dataset.joint);
+      chip.setAttribute("aria-pressed", String(hud.selected[arm] === joint));
+      chip.classList.toggle("moving", hud.active.includes((arm === "left" ? 0 : 7) + joint));
+    }
+    const bases = $("hud").querySelectorAll(".chip.base");
+    bases[0].classList.toggle("moving", hud.active.includes(0));
+    bases[1].classList.toggle("moving", hud.active.includes(7));
+  } else if (current === "driving" && hud.speed !== undefined) {
+    $("kmh").textContent = (hud.speed * 3.6).toFixed(0);
+    const scale = (k) => 50 - 50 * k / hud.k_max;  // positive curvature steers left
+    $("envelope").style.left = `${scale(hud.limit)}%`;
+    $("envelope").style.right = `${scale(hud.limit)}%`;
+    $("needle").style.left = `${scale(hud.curvature)}%`;
+    ribbon = hud.ribbon || [];
+    drawRibbon();
+  }
+}
+
+// The commanded path of the car (DrivingControls.ribbon), a thin line that fades toward the horizon.
+function drawRibbon() {
+  rctx.clearRect(0, 0, 512, 288);
+  if (!ribbonOn || current !== "driving" || ribbon.length < 2) return;
+  rctx.lineCap = "round";
+  for (let i = 1; i < ribbon.length; i++) {
+    const f = i / (ribbon.length - 1);
+    rctx.strokeStyle = `rgba(57, 242, 174, ${0.9 - 0.65 * f})`;
+    rctx.lineWidth = 3.2 - 2.2 * f;
+    rctx.beginPath();
+    rctx.moveTo(ribbon[i - 1][0], ribbon[i - 1][1]);
+    rctx.lineTo(ribbon[i][0], ribbon[i][1]);
+    rctx.stroke();
+  }
+}
+
+// The video keeps 16:9 in the room its column leaves above the key strip.
+function fitStage() {
+  const column = $("video"), keys = $("keys");
+  const room = column.clientHeight - keys.offsetHeight - parseFloat(getComputedStyle(keys).marginTop);
+  $("stage").style.width = `${Math.max(0, Math.min(column.clientWidth, room * 16 / 9))}px`;
+}
+new ResizeObserver(fitStage).observe($("video"));
+new ResizeObserver(fitStage).observe($("keys"));
+
+// --- settings ---
+function showSettings() {
+  $("stepsv").textContent = $("steps").value;
+  $("noisev").textContent = Number($("noise").value).toFixed(2);
+}
+for (const id of ["steps", "noise"]) {
+  $(id).addEventListener("input", () => {
+    showSettings();
+    send({ type: "settings", denoise_steps: Number($("steps").value), context_noise: Number($("noise").value) });
+  });
+  $(id).addEventListener("pointerup", () => $("stage").focus({ preventScroll: true }));
+}
+
+// --- buttons ---
+function newPrompt() { $("loading").hidden = false; $("loading").textContent = "loading a prompt"; send({ type: "prompt" }); }
+function setMode(mode) {
+  if (mode === "interactive") { send({ type: "mode", mode }); return; }
+  $("loading").hidden = false;
+  $("loading").textContent = "replaying the clip";
+  send({ type: "replay" });
+}
+function toggleMode() { if (info) setMode(info.mode === "interactive" ? "replay" : "interactive"); }
+$("newprompt").addEventListener("click", newPrompt);
+// A mouse click returns the keys to the video; users of Tab keep their focus.
+document.addEventListener("click", (event) => {
+  if (event.detail > 0 && event.target.closest("button")) $("stage").focus({ preventScroll: true });
+});
+
+// --- keys ---
+function relevant(code) {
+  const env = envs[current];
+  return !!env && env.hints.some(([codes]) => codes.includes(code));
+}
+function normalize(code) {
+  return code === "ShiftLeft" || code === "ShiftRight" ? "Shift" : code;
+}
+function sendKeys(pressed) {
+  send({ type: "keys", held: [...held], pressed: pressed || null });
+}
+function releaseKeys() {
+  lit.clear();
+  markKeys();
+  if (held.size) { held = new Set(); sendKeys(null); }
+}
+function keyTarget(event) {  // not the focused control's own keys: a slider's arrows, Page and Home / End, a button's Space
+  const el = document.activeElement;
+  if (el && el.matches("input[type=range]") && /^(Arrow|Page|Home|End)/.test(event.code)) return false;
+  if (el && el.matches("button") && event.code === "Space") return false;
+  return !(el && el.matches("input[type=text], textarea"));
+}
+const SCROLL_KEYS = new Set(["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"]);
+window.addEventListener("keydown", (event) => {
+  if (!keyTarget(event)) return;
+  const code = normalize(event.code);
+  if (SCROLL_KEYS.has(code)) event.preventDefault();
+  if (!hello || event.metaKey || event.altKey || event.ctrlKey) return;
+  if (!lit.has(code)) { lit.add(code); markKeys(); }
+  const digit = /^Digit([1-9])$/.exec(code);
+  if ((digit && hello.envs[digit[1] - 1]) || code === "KeyN" || code === "Space") {
+    event.preventDefault();
+    if (event.repeat) return;
+    if (code === "KeyN") newPrompt();
+    else if (code === "Space") toggleMode();
+    else { selectEnv(hello.envs[digit[1] - 1].name, true); lit.add(code); markKeys(); }
+    return;
+  }
+  if (!relevant(code)) return;
+  event.preventDefault();
+  if (!held.has(code)) { held.add(code); sendKeys(event.repeat ? null : code); }
+});
+window.addEventListener("keyup", (event) => {
+  const code = normalize(event.code);
+  if (lit.delete(code)) markKeys();
+  if (held.delete(code)) sendKeys(null);
+});
+window.addEventListener("wheel", (event) => event.preventDefault(), { passive: false });
+window.addEventListener("blur", releaseKeys);
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseKeys(); });
+
+// --- mouse look: pointer lock on the video (Esc releases it), else drag; the motion is sent 25 times a second ---
+const stage = $("stage");
+stage.addEventListener("click", () => {
+  stage.focus({ preventScroll: true });
+  if (envs[current] && envs[current].look && !look.drag && document.pointerLockElement !== stage) {
+    const request = stage.requestPointerLock();
+    if (request && request.catch) request.catch(() => { look.drag = true; });
+  }
+});
+document.addEventListener("pointerlockerror", () => { look.drag = true; });
+stage.addEventListener("mousedown", () => { look.dragging = look.drag; });
+window.addEventListener("mouseup", () => { look.dragging = false; });
+document.addEventListener("mousemove", (event) => {
+  if (!envs[current] || !envs[current].look) return;
+  if (document.pointerLockElement === stage || look.dragging) { look.x += event.movementX; look.y += event.movementY; }
+});
+setInterval(() => {
+  if (!look.x && !look.y) return;
+  send({ type: "look", dx: look.x, dy: look.y });
+  look.x = look.y = 0;
+}, 40);
+
+connect();
+stage.focus({ preventScroll: true });
+</script>
+</body>
+</html>
