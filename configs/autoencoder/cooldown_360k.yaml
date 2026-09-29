@@ -25,7 +25,6 @@ loss:
   grad_balance_max: 10000.0
 dino_rope_augmentation: true  # DINOv3 in train mode during training: its RoPE box-rescale augmentation
 multires: null
-max_wall_hours: null
 seed: 30
 checkpoint_every: 25000
 keep_recent: 2

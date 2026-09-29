@@ -1,8 +1,7 @@
 # Multi-resolution finetune after the cooldown: run with --continue_from <cooldown run>/checkpoint-359999. Clips are
 # loaded at the largest bucket and each step downscales the batch to the next one; the model keeps each size
 # (adaptive resolution) and rescales its decoder's spatial RoPE box by a random factor in [1/1.15, 1.15].
-# `steps` only bounds the run: max_wall_hours ends it, with a final checkpoint.
-steps: 420000
+steps: 400000
 batch_size: 96
 schedule:
   lr: 2.0e-5
@@ -27,7 +26,6 @@ dino_rope_augmentation: true  # DINOv3 in train mode during training: its RoPE b
 multires:
   buckets: [[256, 448], [288, 512], [320, 544], [352, 608], [384, 640]]
   rope_spatial_rescale: 1.15
-max_wall_hours: 12.0
 seed: 30
 checkpoint_every: 2000
 keep_recent: 2

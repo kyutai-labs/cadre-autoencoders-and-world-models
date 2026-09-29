@@ -69,7 +69,7 @@ from `torch.hub` at a pinned commit, so the first build of any model needs netwo
 
 ## Quick start: the interactive demo
 
-The demo runs the four CADRE-2x16x16 world models from a browser on one GPU (H100: 20 fps at 7 denoising steps). It
+The demo runs the four CADRE-2x16x16 world models from a browser on one GPU. It
 loads all four, with the single autoencoder they share, and starts each rollout from a real 2 s clip of a dataset in
 the [DATA.md](DATA.md) format (its `test` split). The page shows only the generated frames.
 
@@ -79,31 +79,13 @@ uv run python demo.py --autoencoder cadre_2x16x16 --weights <weights>/world_mode
     --data robot_manipulation=<root> driving=<root> indoor_navigation=<root> human_manipulation=<root>
 ```
 
-Then open http://localhost:8000. On a cluster node, open a tunnel from your machine first:
-`ssh -N -L 8000:<node>:8000 <login host>`. Startup compiles CUDA graphs, which takes a few minutes (`--no-compile`
-starts at once and runs about 2.5x slower). `--envs` loads fewer environments. `--denoise_steps` and
-`--context_noise` (defaults 7 and 0.15) can also be changed from the page.
+Then open http://localhost:8000 (if the demo runs on another machine, forward the port first, e.g.
+`ssh -N -L 8000:localhost:8000 <machine>`). Startup compiles CUDA graphs, which takes a few minutes (`--no-compile`
+starts at once and runs about 2.5x slower). `--envs` loads fewer environments. The page shows each environment's
+controls, and its sliders change the number of denoising steps and the context noise.
 
 The demo downloads `kyutai/cadre-world-models-2x16x16` from the Hugging Face Hub on first use; `--weights` also
 takes a local copy.
-
-**Controls.** The two hands mirror each other: left hand Q W E / A S D, right hand U I O / J K L.
-
-- Every environment: `1`-`4` switch tabs (Manipulation (Robot), Manipulation (Human), Navigation (Driving),
-  Navigation (Indoor)), `N` starts from a new prompt clip, `Space` toggles between interactive and replay (the clip's
-  recorded actions, which stop at their end rather than looping).
-- Manipulation (Robot), the 14 joints of two YAM arms: `A`/`D` turn the left base (J0), `Q`/`E` select the left
-  arm's other joint (J1-J5 or the gripper), `W`/`S` move it. The right arm uses `J`/`L`, `U`/`O` and `I`/`K`.
-- Manipulation (Human), both wrists of a 102-D hand pose: left wrist `A`/`D` sideways, `W`/`S` forward and back,
-  `Q`/`E` down and up. The right wrist uses `J`/`L`, `I`/`K` and `U`/`O`. The fingers and wrist rotations hold
-  still.
-- Navigation (Driving), speed and curvature: `W` throttle, `S` brake, `X` hard brake, `A`/`D` steer. The planned path
-  is drawn over the video and can be hidden with the "path" toggle.
-- Navigation (Indoor), the 6-D camera twist: `W`/`S` forward and back, `A`/`D` strafe, `Q`/`E` down and up; look with
-  the mouse (click the video to lock the pointer, `Esc` releases it) or with `J`/`L` yaw, `I`/`K` pitch, `U`/`O`
-  roll. Hold `Shift` for fast, `C` for slow.
-
-Every action stays inside the range the environment's training data covers.
 
 ## Models and weights
 
@@ -113,7 +95,7 @@ safetensors plus a `config.json`, and every entry point takes a Hub repo id wher
 - **Autoencoders**, one repo per compression τ×s×s (τ temporal, s spatial), all trained at 288x512 and 20 fps:
   `kyutai/cadre-1x48x48`, `-2x32x32`, `-4x24x24`, `-8x16x16`, `-1x16x16`, `-2x16x16` and `-4x16x16`, the
   150k-step pretraining checkpoints used in the paper. The 2x32x32, 2x16x16, 4x16x16 and 8x16x16 cells also come
-  continued to 360k steps with a learning-rate cooldown, then a multi-resolution fine-tune, as
+  trained further, to 400k steps in total (a learning-rate cooldown, then a multi-resolution fine-tune), as
   `kyutai/cadre-<cell>-multires`: better reconstructions, and usable at other resolutions. The
   world models were trained on the 150k autoencoders, so the continued ones are not drop-in replacements for them.
 - **World models**, `kyutai/cadre-world-models-2x16x16`: the 1.2B-parameter world models trained on
@@ -145,8 +127,9 @@ The four environments are public datasets that we do not redistribute:
 [PhysicalAI-AV](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles) (driving) and
 [RealEstate10K](https://huggingface.co/datasets/chenchenshi/re10k-sc) (indoor navigation).
 [DATA.md, "Preparing the data"](DATA.md#preparing-the-data) walks through downloading each one and converting it with
-`prepare/<environment>.py`. Their defaults reproduce our preprocessing exactly. Human manipulation also needs the MANO
-hand model, which you download yourself. Check a conversion against ours with:
+`prepare/<environment>.py`. Their defaults reproduce our preprocessing exactly. Human manipulation also needs the MANO hand
+model: register at [mano.is.tue.mpg.de](https://mano.is.tue.mpg.de), accept its licence and download "Models & Code"
+(`mano_v1_2.zip`); `prepare/human_manipulation.py --mano_dir <mano_v1_2>/models` then fits it to EgoDex's hand joints. Check a conversion against ours with:
 
 ```sh
 uv run --extra prepare python prepare/check.py --env <environment> --root <root>   # MATCH or MISMATCH
@@ -165,27 +148,33 @@ resumes from the latest checkpoint.
 ### Train an autoencoder
 
 Pick a cell, `cadre_<τ>x<s>x<s>` (`--help` lists them). `--data` takes one or more dataset roots, mixed by
-`--data_weights`. The paper's autoencoders trained on a 23-source mixture (paper appendix).
+`--data_weights`. The paper's autoencoders trained on a 23-source mixture (paper appendix). Every stage keeps a global
+batch of 96 clips of 16 frames.
+
+**Pretraining** (the paper's autoencoders): 150k steps at lr 2e-4 after a 2k-step warmup, on 16 GPUs (2 nodes x 8).
 
 ```sh
-# 1. Pretraining: 150k steps, global batch 96 on 16 GPUs (2 nodes x 8 H100), lr 2e-4 after a 2k-step warmup.
 uv run torchrun --nnodes 2 --nproc_per_node 8 main_autoencoder.py --model cadre_2x16x16 \
     --config configs/autoencoder/pretrain.yaml --data <root> [<root> ...] [--data_weights <w> ...] \
     --dino_weights dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth --output_dir runs/cadre_2x16x16
+```
 
-# 2. Cooldown: continue to 360k steps, with a cosine decay to 2e-5 over the last 70k steps.
-uv run torchrun --nnodes 2 --nproc_per_node 8 main_autoencoder.py --model cadre_2x16x16 \
+**Continued training** (the `-multires` autoencoders, not in the paper): two more stages give better reconstructions
+and an autoencoder that handles several resolutions. The released ones ran them on 32 GPUs (4 nodes x 8, 3 clips each).
+
+```sh
+# Cooldown: continue to 360k steps, with a cosine decay to 2e-5 over the last 70k.
+uv run torchrun --nnodes 4 --nproc_per_node 8 main_autoencoder.py --model cadre_2x16x16 \
     --config configs/autoencoder/cooldown_360k.yaml --data <root> ... \
     --continue_from runs/cadre_2x16x16/checkpoint-149999 --output_dir runs/cadre_2x16x16_360k
 
-# 3. Multi-resolution fine-tune: 12 h at 2e-5, on batches from 256x448 to 384x640.
-uv run torchrun --nnodes 2 --nproc_per_node 8 main_autoencoder.py --model cadre_2x16x16 \
+# Multi-resolution fine-tune: to 400k steps at 2e-5, on batches from 256x448 to 384x640.
+uv run torchrun --nnodes 4 --nproc_per_node 8 main_autoencoder.py --model cadre_2x16x16 \
     --config configs/autoencoder/multires_ft.yaml --data <root> ... \
-    --continue_from runs/cadre_2x16x16_360k/checkpoint-359999 --output_dir runs/cadre_2x16x16_ft
+    --continue_from runs/cadre_2x16x16_360k/checkpoint-359999 --output_dir runs/cadre_2x16x16_multires
 ```
 
-All three stages keep the global batch of 96 clips of 16 frames. The released continued autoencoders ran stages 2
-and 3 on 32 GPUs (4 nodes, 3 clips each). `--finetune_from <checkpoint.pt>` starts from release weights at step 0.
+`--finetune_from <checkpoint or repo id>` starts from released weights at step 0.
 
 ### Train a world model
 
@@ -213,14 +202,14 @@ uv run torchrun --nproc_per_node 8 main_idm.py --env robot_manipulation --data <
     --dino_weights dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth --output_dir runs/idm_robot_manipulation
 ```
 
-On fewer GPUs, raise `--grad_accum` to keep 384 clips per step. The released probes are the step-55000 checkpoints
-(human manipulation: step 60000).
+On fewer GPUs, raise `--grad_accum` to keep 384 clips per step.
 
 ### Evaluate
 
-Rollouts: each window of the manifest gives 40 real context frames with their actions, then 96 generated frames (10
-denoising steps, context noise 0.2) under the recorded actions. FID, FVD, PSNR and LPIPS are scored every 16 frames,
-and ARR too when you pass a probe. Any number of GPUs gives the same rollouts.
+Rollouts: the manifest lists evaluation clips of 136 frames (a video and a start frame). For each one the world model
+sees the first 40 real frames with their actions, then generates the next 96 under the recorded actions (10 denoising
+steps, context noise 0.2). FID, FVD, PSNR and LPIPS are scored every 16 frames,
+and ARR too when you pass a probe. Each clip's noise is seeded from its name, so any number of GPUs gives the same rollouts.
 
 ```sh
 uv run torchrun --nproc_per_node 8 main_eval.py rollout --env robot_manipulation \
@@ -228,7 +217,8 @@ uv run torchrun --nproc_per_node 8 main_eval.py rollout --env robot_manipulation
     --manifest manifests/robot_manipulation_test.txt [--set decode_steps=2]
 ```
 
-Reconstruction, on the 3072 held-out OpenVid-HD windows, 16 frames each, decoded in one step:
+Reconstruction, on 3072 held-out 16-frame clips of [OpenVid-HD](https://huggingface.co/datasets/nkp37/OpenVid-1M)
+(the `OpenVidHD` part of OpenVid-1M), decoded in one step:
 
 ```sh
 uv run torchrun --nproc_per_node 8 main_eval.py reconstruction --checkpoint <autoencoder> \
@@ -259,23 +249,13 @@ paper's 2048 windows.
 - Reconstruction evaluation (appendix): `engine_eval.py`, `configs/eval/reconstruction.yaml`.
 - Interactive demo: `demo.py`, `demo.html`.
 
-## Results
-
-CADRE covers most of the latency-quality frontier in all four environments, and its lead widens when the camera
-moves. The study behind it comes to four findings. At strong compression, a diffusion decoder is sharper than
-perceptual regression. In robot manipulation, temporal compression works better in the autoencoder than in the world
-model. Manipulation and navigation call for opposite compressions. With a still camera, coarser spatial tokens hurt
-motion far more than image quality. The paper has the full numbers, and [wmoptimal.github.io](https://wmoptimal.github.io)
-has uncurated rollouts.
-
 ## Citation
 
 ```bibtex
-@inproceedings{ramananarahary2027cadre,
+@misc{ramananarahary2026cadre,
   title     = {Rethinking Video Autoencoders for Interactive World Models},
   author    = {Ramanana Rahary, Adrien and Bai, Yutong and Dufour, Nicolas and P{\'e}rez, Patrick and Picard, David},
-  booktitle = {Under review at the International Conference on Learning Representations (ICLR)},
-  year      = {2027},
+  year      = {2026},
   note      = {arXiv link coming soon}
 }
 ```
@@ -292,4 +272,7 @@ licences (EgoDex: CC-BY-NC-ND; MANO: Max Planck non-commercial).
 CADRE builds on [DINOv3](https://github.com/facebookresearch/dinov3),
 [RAE](https://github.com/bytetriper/RAE), [MIRA](https://github.com/mira-wm/mira), [LPIPS](https://github.com/richzhang/PerceptualSimilarity),
 [pytorch-fid](https://github.com/mseitzer/pytorch-fid) and [cd-fvd](https://github.com/songweig/content-debiased-fvd),
-and on the ABC-130k, EgoDex, PhysicalAI-AV and RealEstate10K datasets.
+and on the [ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k), [EgoDex](https://github.com/apple/ml-egodex),
+[PhysicalAI-AV](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles),
+[RealEstate10K](https://huggingface.co/datasets/chenchenshi/re10k-sc) and
+[OpenVid-1M](https://huggingface.co/datasets/nkp37/OpenVid-1M) datasets.

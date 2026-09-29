@@ -20,7 +20,6 @@ betas: [0.9, 0.99]
 weight_decay: 0.1
 grad_clip: 1.0
 ema_decay: 0.9999
-max_wall_hours: null
 seed: 28
 checkpoint_every: 10000
 keep_recent: 1

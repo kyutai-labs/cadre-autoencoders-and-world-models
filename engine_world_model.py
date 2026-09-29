@@ -30,7 +30,6 @@ from util.ema import EMA
 from util.lr_schedule import LRSchedule, lr_at, set_lr
 
 EARLY_LOG_STEPS = 10  # the first steps are all logged
-WALL_CLOCK_EVERY = 50  # steps between two checks of max_wall_hours
 
 
 class WorldModelTrainConfig(BaseModel):
@@ -52,7 +51,6 @@ class WorldModelTrainConfig(BaseModel):
     weight_decay: float = 0.1
     grad_clip: float = 1.0
     ema_decay: float = 0.9999
-    max_wall_hours: float | None = None  # stop cleanly (with a final checkpoint) after this much training time
     seed: int = 28
     checkpoint_every: int = 10_000
     keep_recent: int = 1  # checkpoints kept besides the permanent ones
@@ -207,7 +205,7 @@ def train(
                 f.write(json.dumps(record) + "\n")
 
     sums: dict[str, Tensor] = defaultdict(lambda: torch.zeros((), device=device))
-    steps_since_log, last_log, loop_start = 0, time.monotonic(), time.monotonic()
+    steps_since_log, last_log = 0, time.monotonic()
     step = start
     for step in range(start, c.steps):
         batch = next(batches)
@@ -237,11 +235,6 @@ def train(
             if distributed.is_main():
                 trainer.save(output_dir, step)
             distributed.barrier()
-        if c.max_wall_hours is not None and step % WALL_CLOCK_EVERY == 0:
-            # Rank 0's clock decides, so every rank stops at the same step.
-            if distributed.broadcast_object(time.monotonic() - loop_start > 3600 * c.max_wall_hours):
-                log({"step": step, "stopped": f"max_wall_hours={c.max_wall_hours}"})
-                break
     if distributed.is_main():
         trainer.save(output_dir, step, final=True)
     distributed.barrier()
