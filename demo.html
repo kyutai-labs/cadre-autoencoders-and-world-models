@@ -58,9 +58,9 @@ main { flex: 1; min-height: 0; width: 100%; max-width: 1760px; margin: 0 auto; p
 .tab[aria-selected="true"]::after { background: var(--green); border-color: var(--green); }
 .tab .num { font-size: 11px; opacity: .55; margin-left: 6px; }
 
-.layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 24vw, 320px);
-  gap: 22px; }
-.video { min-height: 0; }
+/* The video, its key strip (as wide) and the side panel (as tall as the video) are sized by fitStage, side by side. */
+.layout { flex: 1; min-height: 0; display: flex; gap: 22px; justify-content: center; align-items: flex-start; }
+.video { flex: none; }
 
 /* video */
 .stage { position: relative; background: #000; border: 1px solid var(--line); aspect-ratio: 16 / 9; outline: none;
@@ -74,7 +74,6 @@ main { flex: 1; min-height: 0; width: 100%; max-width: 1760px; margin: 0 auto; p
 .badge { background: rgba(10,10,10,.72); backdrop-filter: blur(4px); letter-spacing: .08em; font-weight: 600; }
 .badge.interactive { color: var(--green); }
 .badge.replay { color: var(--orange); }
-.badge.ended { color: var(--orange); border-style: dashed; }
 .loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 15px;
   pointer-events: none; }
 
@@ -93,7 +92,9 @@ kbd.down { background: var(--green); color: #000; border-color: var(--green); }
 .keys .general .keygroup { gap: 4px; }
 
 /* side panel */
-.panel { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+/* As tall as the video: the cards share its height, each centering its content. */
+.panel { flex: none; width: clamp(260px, 22vw, 400px); display: flex; flex-direction: column; gap: 12px; }
+.panel .card { flex: 1 1 auto; display: flex; flex-direction: column; justify-content: space-evenly; }
 .card { background: var(--surface); border: 1px solid var(--line); padding: 13px 16px; }
 .row { display: flex; gap: 8px; margin-top: 12px; }
 .seg { display: flex; border: 1px solid var(--line); }
@@ -118,7 +119,7 @@ kbd.down { background: var(--green); color: #000; border-color: var(--green); }
 .arm + .arm { margin-top: 8px; }
 .arm .name { width: 30px; color: var(--muted); }
 .chips { display: flex; gap: 3px; }
-.chip { background: var(--raised); border: 1px solid var(--line); color: var(--muted); padding: 2px 6px; font-size: 13px; cursor: pointer; border-radius: 3px; }
+.chip { background: var(--raised); border: 1px solid var(--line); color: var(--muted); padding: 2px 4px; font-size: 13px; cursor: pointer; border-radius: 3px; }
 .chip.base { cursor: default; border-style: dashed; }
 .chip[aria-pressed="true"] { color: var(--text); border-color: var(--green); }
 .chip.moving { background: var(--green); color: #000; border-color: var(--green); }
@@ -157,7 +158,7 @@ kbd.down { background: var(--green); color: #000; border-color: var(--green); }
 
 <main>
   <div class="tabs" role="tablist" id="tabs" aria-label="environment"></div>
-  <div class="layout">
+  <div class="layout" id="layout">
     <section class="video" id="video">
       <div class="stage" id="stage" tabindex="0" aria-label="world model video">
         <canvas id="screen" width="512" height="288"></canvas>
@@ -168,11 +169,11 @@ kbd.down { background: var(--green); color: #000; border-color: var(--green); }
       <div class="keys" id="keys" aria-label="keys"></div>
     </section>
 
-    <aside class="panel">
+    <aside class="panel" id="panel">
       <div class="card">
         <div class="seg" id="modes" role="group" aria-label="action source"></div>
         <div class="row">
-          <button class="btn sc" id="newprompt" title="n">new prompt</button>
+          <button class="btn sc" id="nextclip" title="tab">next clip</button>
         </div>
       </div>
       <div class="card" id="hudcard" hidden><div id="hud"></div></div>
@@ -193,9 +194,9 @@ kbd.down { background: var(--green); color: #000; border-color: var(--green); }
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const KEY_LABELS = { Shift: "shift", Space: "space" };
-// Space toggles the mode: replay plays the prompt clip's recording from its start, interactive takes over from the
-// frame on screen (also when a replay has ended).
+const KEY_LABELS = { Shift: "shift", Space: "space", Tab: "tab" };
+// Space toggles the mode: replay plays the prompt clip's recording from its start (then random other clips', one after
+// the other), interactive takes over from the frame on screen. Tab moves to a random other clip.
 
 
 let socket = null, hello = null, envs = {}, current = null, info = null;
@@ -245,8 +246,6 @@ function onText(message) {
     buildTabs();
     selectEnv(message.env, false);
     setReadout("live", "");
-  } else if (message.type === "state") {
-    applyInfo(message);
   }
 }
 
@@ -322,7 +321,7 @@ function keygroup(caps, what) {
 }
 function globalKeys() {
   const digits = hello.envs.map((_, i) => `Digit${i + 1}`);
-  return [[digits, "environment"], [["KeyN"], "new prompt"], [["Space"], "interactive / replay"]];
+  return [[digits, "environment"], [["Tab"], "next clip"], [["Space"], "interactive / replay"]];
 }
 function buildKeys(env) {
   const groups = env.hints.map(([codes, what]) => keygroup(keycaps(codes), what));
@@ -330,6 +329,7 @@ function buildKeys(env) {
   const general = globalKeys().map(([codes, what]) => keygroup(keycaps(codes), what));
   $("keys").innerHTML = groups.join("") + `<span class="keygroup general">${general.join("")}</span>`;
   markKeys();
+  fitStage();
 }
 function markKeys() {
   for (const kbd of $("keys").querySelectorAll("kbd[data-code]")) kbd.classList.toggle("down", lit.has(kbd.dataset.code));
@@ -365,8 +365,8 @@ function applyInfo(message) {
   info = message;
   const badge = $("badge");
   badge.hidden = false;
-  badge.className = `pill badge sc ${message.ended ? "ended" : message.mode}`;
-  badge.textContent = message.ended ? "replay ended" : message.mode;
+  badge.className = `pill badge sc ${message.mode}`;
+  badge.textContent = message.mode;
   if (message.latency_ms) latency = message.latency_ms;
   const fps = shown.length > 1 ? 1000 * (shown.length - 1) / (shown[shown.length - 1] - shown[0]) : 0;
   const text = `${fps ? fps.toFixed(1) : "–"} fps` + (latency ? ` · ${latency.toFixed(0)} ms latency` : "");
@@ -412,14 +412,23 @@ function drawRibbon() {
   }
 }
 
-// The video keeps 16:9 in the room its column leaves above the key strip.
+// The video keeps 16:9 in the room the side panel leaves, above a key strip exactly as wide (whose height depends on
+// its width: a few passes settle it); the panel is as tall as the video.
 function fitStage() {
-  const column = $("video"), keys = $("keys");
-  const room = column.clientHeight - keys.offsetHeight - parseFloat(getComputedStyle(keys).marginTop);
-  $("stage").style.width = `${Math.max(0, Math.min(column.clientWidth, room * 16 / 9))}px`;
+  const layout = $("layout"), panel = $("panel"), keys = $("keys");
+  const maxWidth = layout.clientWidth - panel.offsetWidth - parseFloat(getComputedStyle(layout).columnGap);
+  const maxHeight = layout.clientHeight - parseFloat(getComputedStyle(keys).marginTop);
+  let width = maxWidth;
+  for (let pass = 0; pass < 4; pass++) {
+    keys.style.width = `${width}px`;
+    const fit = Math.max(0, Math.min(maxWidth, (maxHeight - keys.offsetHeight) * 16 / 9));
+    if (Math.abs(fit - width) < 0.5) break;
+    width = fit;
+  }
+  for (const el of [$("video"), $("stage"), keys]) el.style.width = `${width}px`;
+  panel.style.height = `${$("stage").offsetHeight}px`;
 }
-new ResizeObserver(fitStage).observe($("video"));
-new ResizeObserver(fitStage).observe($("keys"));
+new ResizeObserver(fitStage).observe($("layout"));
 
 // --- settings ---
 function showSettings() {
@@ -435,7 +444,7 @@ for (const id of ["steps", "noise"]) {
 }
 
 // --- buttons ---
-function newPrompt() { $("loading").hidden = false; $("loading").textContent = "loading a prompt"; send({ type: "prompt" }); }
+function nextClip() { $("loading").hidden = false; $("loading").textContent = "loading a clip"; send({ type: "next" }); }
 function setMode(mode) {
   if (mode === "interactive") { send({ type: "mode", mode }); return; }
   $("loading").hidden = false;
@@ -443,7 +452,7 @@ function setMode(mode) {
   send({ type: "replay" });
 }
 function toggleMode() { if (info) setMode(info.mode === "interactive" ? "replay" : "interactive"); }
-$("newprompt").addEventListener("click", newPrompt);
+$("nextclip").addEventListener("click", nextClip);
 // A mouse click returns the keys to the video; users of Tab keep their focus.
 document.addEventListener("click", (event) => {
   if (event.detail > 0 && event.target.closest("button")) $("stage").focus({ preventScroll: true });
@@ -479,10 +488,10 @@ window.addEventListener("keydown", (event) => {
   if (!hello || event.metaKey || event.altKey || event.ctrlKey) return;
   if (!lit.has(code)) { lit.add(code); markKeys(); }
   const digit = /^Digit([1-9])$/.exec(code);
-  if ((digit && hello.envs[digit[1] - 1]) || code === "KeyN" || code === "Space") {
-    event.preventDefault();
+  if ((digit && hello.envs[digit[1] - 1]) || code === "Tab" || code === "Space") {
+    event.preventDefault();  // Tab too: it picks a clip, focus stays
     if (event.repeat) return;
-    if (code === "KeyN") newPrompt();
+    if (code === "Tab") nextClip();
     else if (code === "Space") toggleMode();
     else { selectEnv(hello.envs[digit[1] - 1].name, true); lit.add(code); markKeys(); }
     return;

@@ -30,8 +30,8 @@ across the two hands (left: Q W E / A S D, right: U I O / J K L):
   the keys); the world model derives its discrete keys from it.
 - human_manipulation: 102-D hand-pose deltas. The keys move each wrist along the world axes; its rotation and finger
   joints hold still.
-Every environment has a replay mode: the prompt clip's recorded actions, time-aligned with the clip, which stops at
-their end instead of wrapping.
+Every environment has a replay mode: the prompt clip's recorded actions, time-aligned with the clip; at their end the
+replay moves on to a random other window of the environment, as the page's next-clip key does.
 """
 
 import argparse
@@ -454,14 +454,15 @@ class Demo:
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.lock = asyncio.Lock()
         self.socket = None
+        self.rng = random.Random()  # the clips' random order, from system entropy; reseeded per session
 
     # --- worker thread ---
 
-    def new_prompt(self, env: str, index: int | None = None, seed: int | None = None) -> None:
-        """Start env's rollout from a window of its dataset (random unless `index`)."""
+    def new_prompt(self, env: str, index: int, seed: int | None = None) -> None:
+        """Start env's rollout from a window of its dataset."""
         dataset = self.datasets[env]
-        index = random.randrange(len(dataset)) if index is None else index % len(dataset)
-        seed = random.randrange(2**31) if seed is None else seed
+        index %= len(dataset)
+        seed = self.rng.randrange(2**31) if seed is None else seed
         rollout = Rollout(self.world_models[env], self.autoencoder, dataset[index], index, seed, self.device)
         self.rollouts[env] = rollout
         self.controls[env].reset(rollout.last_action)
@@ -471,12 +472,13 @@ class Demo:
         kind, env = command["type"], self.env
         if kind == "env" and command["env"] in self.world_models:  # the page releases its keys first
             self.env = command["env"]
-        elif kind == "prompt":
-            self.modes[env] = MODES[0]
-            self.new_prompt(env, command.get("index"), command.get("seed"))
+        elif kind == "prompt":  # a window of the dataset, in the current mode
+            self.new_prompt(env, int(command["index"]), command.get("seed"))
+        elif kind == "next":  # a random other window, in the current mode
+            self.new_prompt(env, self.next_prompt(env))
         elif kind == "replay":  # the prompt clip again, under its recorded actions
             self.modes[env] = "replay"
-            index = self.rollouts[env].index if env in self.rollouts else None
+            index = self.rollouts[env].index if env in self.rollouts else self.next_prompt(env)
             self.new_prompt(env, command.get("index", index), command.get("seed"))
         elif kind == "mode" and command["mode"] in MODES:
             self.modes[env] = command["mode"]
@@ -493,19 +495,26 @@ class Demo:
             self.context_noise = min(max(float(command.get("context_noise", self.context_noise)), 0.0), 1.0)
         return None
 
-    def produce(self) -> Chunk | None:
-        """Apply the pending commands, then the frames of one step of the current environment (from a new prompt if
-        it has none), or None when its replay has ended."""
+    def next_prompt(self, env: str) -> int:
+        """A random window of env's dataset other than the current one."""
+        n, current = len(self.datasets[env]), self.rollouts[env].index if env in self.rollouts else None
+        if current is None or n == 1:
+            return self.rng.randrange(n)
+        return (current + 1 + self.rng.randrange(n - 1)) % n
+
+    def produce(self) -> Chunk:
+        """Apply the pending commands, then the frames of one step of the current environment (from a random window
+        if it has no rollout). A replay at the end of its recording goes on with a random other window's."""
         while not self.commands.empty():
             self.apply(self.commands.get())
         env = self.env
         if env not in self.rollouts:
-            self.new_prompt(env)
+            self.new_prompt(env, self.next_prompt(env))
+        if self.modes[env] == "replay" and self.rollouts[env].recorded_actions() is None:
+            self.new_prompt(env, self.next_prompt(env))
         rollout, started = self.rollouts[env], time.perf_counter()
         if self.modes[env] == "replay":
             actions = rollout.recorded_actions()
-            if actions is None:
-                return None
         else:
             keys, self.tapped = self.held | self.tapped, set()
             actions = self.controls[env].actions(keys, rollout.tau)
@@ -518,7 +527,7 @@ class Demo:
         return {
             "env": env,
             "mode": self.modes[env],
-            "ended": self.modes[env] == "replay" and rollout.recorded_actions() is None,
+            "index": rollout.index,
             "step": rollout.steps,
             "remaining": rollout.remaining(),
             "prompt": rollout.key,
@@ -563,6 +572,7 @@ class Demo:
         async with self.lock:
             if self.socket is not socket:
                 return
+            self.rng = random.Random()
             await socket.send_text(json.dumps(self.hello()))
             receiver = asyncio.create_task(self.receive(socket))
             try:
@@ -588,19 +598,12 @@ class Demo:
     async def stream(self, socket, receiver: asyncio.Task) -> None:
         """Play each chunk at FPS while the worker produces the next."""
         loop = asyncio.get_running_loop()
-        clock, playing, idle = loop.time(), None, False
+        clock, playing = loop.time(), None
         while not receiver.done() and self.socket is socket:
             work = loop.run_in_executor(self.executor, self.produce)
             if playing is not None:
                 clock = await self.play(socket, playing, clock)
             playing = await work
-            if playing is None:  # the replay has ended: wait for a command
-                if not idle:
-                    await socket.send_text(json.dumps({"type": "state"} | self.info(self.env)))
-                idle = True
-                await asyncio.sleep(0.05)
-            else:
-                idle = False
 
     async def play(self, socket, chunk: Chunk, clock: float) -> float:
         """Send the chunk's frames one per 1 / FPS s from `clock` (or now, if production fell behind)."""
@@ -651,8 +654,6 @@ def warm_up(demo: Demo, steps: int = 4) -> dict[str, float]:
         demo.env = env
         demo.new_prompt(env, index=0, seed=0)
         for _ in range(steps):
-            if demo.modes[env] == "replay" and demo.rollouts[env].recorded_actions() is None:
-                break
             timings[env] = demo.produce().info["compute_ms"]
     demo.env, demo.rollouts = demo.envs[0], {}
     return timings
