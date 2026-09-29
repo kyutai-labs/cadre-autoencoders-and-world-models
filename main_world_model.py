@@ -18,6 +18,7 @@ import torch
 import yaml
 
 from dataset import EnvironmentDataset
+from engine_eval import rollout_evaluator
 from engine_world_model import Trainer, WorldModelTrainConfig, model_config, train
 from model_autoencoder import CADRE
 from model_world_model import WorldModel
@@ -38,6 +39,10 @@ def main() -> None:
     parser.add_argument("--continue_from", help="a checkpoint (or run) directory whose full training state to continue")
     parser.add_argument("--batch_size", type=int, help="global batch size, overriding the recipe")
     parser.add_argument("--num_workers", type=int, help="data loader workers per GPU, overriding the recipe")
+    parser.add_argument(
+        "--eval_clips", type=int, default=256, help="val clips of --data scored every eval_every steps (0: none)"
+    )
+    parser.add_argument("--probe", help="IDM probe (.pt or Hub repo id) to add ARR to those scores")
     args = parser.parse_args()
 
     path = Path(args.env) if args.env.endswith(".yaml") else RECIPES / f"{args.env}.yaml"
@@ -65,7 +70,11 @@ def main() -> None:
         (output_dir / "config.yaml").write_text(yaml.safe_dump(run, sort_keys=False))
 
     dataset = EnvironmentDataset(config.environment, args.data, "train", config.frames, autoencoder.config.resolution)
-    train(Trainer(model, autoencoder, autoencoder_checkpoint, config, device), dataset, output_dir, source)
+    evaluate = None
+    if args.eval_clips:
+        evaluate = rollout_evaluator(config.environment, args.data, args.eval_clips, output_dir, device, args.probe)
+    trainer = Trainer(model, autoencoder, autoencoder_checkpoint, config, device)
+    train(trainer, dataset, output_dir, source, evaluate=evaluate)
     distributed.cleanup()
 
 

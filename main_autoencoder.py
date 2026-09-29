@@ -20,6 +20,7 @@ import yaml
 
 from dataset import ClipDataset
 from engine_autoencoder import AutoencoderTrainConfig, Trainer, data_resolution, model_config, train
+from engine_eval import reconstruction_evaluator
 from model_autoencoder import CADRE, CADRE_MODELS
 from util import distributed
 from util.checkpoint import resume_source
@@ -39,6 +40,8 @@ def main() -> None:
     )
     parser.add_argument("--batch_size", type=int, help="global batch size, overriding the recipe")
     parser.add_argument("--num_workers", type=int, help="data loader workers per GPU, overriding the recipe")
+    parser.add_argument("--eval_data", help="dataset root (DATA.md) whose val clips are scored every eval_every steps")
+    parser.add_argument("--eval_clips", type=int, default=256, help="number of those val clips")
     args = parser.parse_args()
     weights = args.data_weights or [1.0] * len(args.data)
     assert len(weights) == len(args.data), "give one --data_weights value per --data root"
@@ -63,7 +66,8 @@ def main() -> None:
 
     resolution = data_resolution(model, config)
     datasets = [ClipDataset(root, "train", model.config.num_frames, resolution, actions=False) for root in args.data]
-    train(Trainer(model, args.model, config, device), datasets, weights, output_dir, source)
+    evaluate = reconstruction_evaluator(args.eval_data, args.eval_clips, output_dir, device) if args.eval_data else None
+    train(Trainer(model, args.model, config, device), datasets, weights, output_dir, source, evaluate=evaluate)
     distributed.cleanup()
 
 

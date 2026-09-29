@@ -188,8 +188,12 @@ uv run torchrun --nnodes 2 --nproc_per_node 8 main_world_model.py --env robot_ma
     --output_dir runs/wm_robot_manipulation_2x16x16
 ```
 
-The four recipes differ only in the environment, its action statistics and the noise shift. One recipe serves every
+The four recipes differ only in the environment and its action statistics. One recipe serves every
 autoencoder.
+
+Every `eval_every` steps, `log.jsonl` gets the paper's rollout metrics (FID, FVD, PSNR and LPIPS at 96 frames) on 256
+clips of the dataset's `val` split, and ARR too with `--probe <probe>`. `--eval_clips 0` turns this off. For an
+autoencoder, `--eval_data <root>` logs its reconstruction metrics the same way.
 
 ### Train an IDM probe
 
@@ -240,7 +244,7 @@ paper's 2048 windows.
 - Progressive self-distillation, one- or few-step decoding ("Training", Eq. 3): `losses.py` (`loss_psd`), `engine_autoencoder.py`.
 - Autoencoder training, the cooldown and the multi-resolution fine-tune: `engine_autoencoder.py`,
   `configs/autoencoder/`.
-- World model, a causal DiT with diffusion forcing, per-frame actions and the noise shift ("Judging an autoencoder by its world model", appendix):
+- World model, a causal DiT with diffusion forcing, per-frame actions and a noise-schedule shift set by the autoencoder's latent grid ("Judging an autoencoder by its world model", appendix):
   `model_world_model.py`, `engine_world_model.py`, `configs/world_model/`.
 - Environments and their actions (Table 1): `ENVIRONMENTS` in `dataset.py`, `prepare/`, [DATA.md](DATA.md).
 - Rollout protocol and streaming inference loop (appendix, "Inference"): `engine_eval.py`, `configs/eval/rollout.yaml`.

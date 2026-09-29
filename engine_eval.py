@@ -18,14 +18,16 @@ added in. A window listed k times is scored k times, with different noise.
 
 import collections
 import hashlib
+from pathlib import Path
 
 import torch
 from pydantic import BaseModel, ConfigDict
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from dataset import ClipDataset, read_manifest
-from metrics import ReconstructionMetrics, RolloutMetrics
+from dataset import ClipDataset, EnvironmentDataset, read_manifest, read_split
+from metrics import ARR_DIMS, SLICE_FRAMES, ReconstructionMetrics, RolloutMetrics
+from model_idm import load_probe
 from model_world_model import decode_latents, encode_video
 from util import distributed
 
@@ -177,3 +179,40 @@ def paper_numbers(results: dict[str, float], env: str | None) -> dict[str, float
     keys = ["fid_at_96", "fvd_at_96", f"psnr_at_{PSNR_FRAMES.get(env, 96)}", "lpips_at_96"]
     keys += ["arr_at_96", "arr_control_at_96", "arr_gap_at_96"]
     return {k: results[k] for k in keys if k in results}
+
+
+def validation_manifest(root, clip_frames: int, n: int, path) -> str:
+    """A manifest of the first n val videos long enough for one clip, each from frame 0, written to path."""
+    lines = [f"{key} 0" for key, frames in read_split(root, "val") if frames >= clip_frames][:n]
+    if distributed.is_main():
+        Path(path).write_text("\n".join(lines) + "\n")
+    distributed.barrier()
+    return str(path)
+
+
+def rollout_evaluator(env: str, root, n: int, output_dir, device, probe: str | None = None):
+    """evaluate(world_model, autoencoder, step) for training: the paper's rollout metrics on n val clips of root."""
+    config = RolloutEvalConfig(compile=False)
+    probe_model = load_probe(probe).to(device) if probe else None
+    manifest = validation_manifest(root, config.clip_frames, n, Path(output_dir) / "val_manifest.txt")
+
+    def evaluate(world_model, autoencoder, step: int) -> dict[str, float]:
+        dataset = EnvironmentDataset(env, root, "val", config.clip_frames, autoencoder.config.resolution, manifest)
+        metrics = RolloutMetrics(config.generated_frames // SLICE_FRAMES, probe_model, ARR_DIMS.get(env), device)
+        loader = shard_loader(dataset, manifest, config.seed, config.batch_size, config.num_workers)
+        return paper_numbers(evaluate_rollout(world_model, autoencoder, metrics, loader, config, device), env)
+
+    return evaluate
+
+
+def reconstruction_evaluator(root, n: int, output_dir, device):
+    """evaluate(autoencoder, step) for training: the paper's reconstruction metrics on n val clips of root."""
+    config = ReconstructionEvalConfig()
+    manifest = validation_manifest(root, config.clip_frames, n, Path(output_dir) / "val_manifest.txt")
+
+    def evaluate(autoencoder, step: int) -> dict[str, float]:
+        dataset = ClipDataset(root, "val", config.clip_frames, autoencoder.config.resolution, manifest, actions=False)
+        loader = shard_loader(dataset, manifest, config.seed, config.batch_size, config.num_workers)
+        return evaluate_reconstruction(autoencoder, ReconstructionMetrics(device), loader, config, device)
+
+    return evaluate
