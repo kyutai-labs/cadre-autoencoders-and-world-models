@@ -46,12 +46,11 @@ uv sync                  # add --extra demo for the demo, --extra prepare for th
 ## Interactive demo
 
 ```sh
-uv run --extra demo python demo.py --data robot_manipulation=<root> human_manipulation=<root> driving=<root> \
-    indoor_navigation=<root>
+uv run --extra demo python demo.py
 ```
 
-Open http://localhost:8000. The world models download from the Hub; `--data` points to datasets in the
-[DATA.md](DATA.md) format, whose clips start each rollout. The page lists the controls.
+Open http://localhost:8000. The world models and six prompt clips per environment download from the Hub;
+`--data <environment>=<root>` starts the rollouts from your own clips instead ([DATA.md](DATA.md) format).
 
 ## Models
 

@@ -1,24 +1,23 @@
 """Interactive demo of the CADRE world models: drive them from a browser, at the video's 20 fps.
 
     uv sync --extra demo
-    uv run python demo.py \\
-        --data robot_manipulation=<root> driving=<root> indoor_navigation=<root> human_manipulation=<root>
+    uv run python demo.py
 
 then open http://localhost:8000 (on a cluster node: ssh -N -L 8000:<node>:8000 <login host>).
 
 One process hosts the world models of one autoencoder, <weights>/<environment> for each environment of --envs (by
 default the Hub repo kyutai/cadre-world-models-2x16x16; a local directory of <environment>/<autoencoder>.pt files also
-works), sharing a single copy of the autoencoder they nest, and serves one browser session at a time over a
-websocket (a new connection takes over). Each environment rolls out from a real prompt: the first 40 frames of a
-window of its --data root (DATA.md; the --manifest windows, else the split's), which also brings the recorded actions
-of the replay mode. The prompt only primes the world model (its latents and their KV cache): the page shows the
-generated frames alone, from the first step on, as the paper's demo did. A step reads the current action, predicts
-the next latent with the world model's KV cache (next_latent: denoise_steps Euler steps, the new frame cached at
-context noise), decodes its tau frames as the rollout evaluation streams them (a window of latents sliding one latent
-a step, the decoder's noise an AR(1) buffer), and sends them as JPEG, paced at 20 fps; the next step runs while they
-play. All of it under bf16 autocast with fp32
-weights, as the rollout evaluation runs, compiled with CUDA graphs (a few minutes at startup; --no-compile runs eager,
-about 2.5x slower). The default denoise_steps is the most that keeps real time on an H100 (DENOISE_STEPS).
+works), sharing a single copy of the autoencoder they nest, and serves one browser session at a time over a websocket (a
+new connection takes over). Each environment rolls out from a real prompt: the first 40 frames of a window of its --data
+root (DATA.md; the --manifest windows, else the split's; by default the six clips per environment of the weights'
+demo_clips/), which also brings the recorded actions of the replay mode. The prompt only primes the world model (its
+latents and their KV cache): the page shows the generated frames alone, from the first step on, as the paper's demo did.
+A step reads the current action, predicts the next latent with the world model's KV cache (next_latent: denoise_steps
+Euler steps, the new frame cached at context noise), decodes its tau frames as the rollout evaluation streams them (a
+window of latents sliding one latent a step, the decoder's noise an AR(1) buffer), and sends them as JPEG, paced at 20
+fps; the next step runs while they play. All of it under bf16 autocast with fp32 weights, as the rollout evaluation
+runs, compiled with CUDA graphs (a few minutes at startup; --no-compile runs eager, about 2.5x slower). The default
+denoise_steps is the most that keeps real time on an H100 (DENOISE_STEPS).
 
 Actions are per video frame, in each dataset's units, and stay inside the training range. The keys mirror each other
 across the two hands (left: Q W E / A S D, right: U I O / J K L):
@@ -31,7 +30,7 @@ across the two hands (left: Q W E / A S D, right: U I O / J K L):
 - human_manipulation: 102-D hand-pose deltas. The keys move each wrist along the world axes; its rotation and finger
   joints hold still.
 Every environment has a replay mode: the prompt clip's recorded actions, time-aligned with the clip; at their end the
-replay moves on to a random other window of the environment, as the page's next-clip key does.
+replay moves on to the next window of the environment, as the page's next-clip key does.
 """
 
 import argparse
@@ -49,6 +48,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
+from huggingface_hub import snapshot_download
 from torchvision.io import encode_jpeg
 
 from dataset import ENVIRONMENTS, FPS, RESOLUTION, EnvironmentDataset
@@ -454,7 +454,7 @@ class Demo:
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.lock = asyncio.Lock()
         self.socket = None
-        self.rng = random.Random()  # the clips' random order, from system entropy; reseeded per session
+        self.rng = random.Random()  # the rollouts' noise seeds, from system entropy; reseeded per session
 
     # --- worker thread ---
 
@@ -474,7 +474,7 @@ class Demo:
             self.env = command["env"]
         elif kind == "prompt":  # a window of the dataset, in the current mode
             self.new_prompt(env, int(command["index"]), command.get("seed"))
-        elif kind == "next":  # a random other window, in the current mode
+        elif kind == "next":  # the next window, in the current mode
             self.new_prompt(env, self.next_prompt(env))
         elif kind == "replay":  # the prompt clip again, under its recorded actions
             self.modes[env] = "replay"
@@ -496,15 +496,12 @@ class Demo:
         return None
 
     def next_prompt(self, env: str) -> int:
-        """A random window of env's dataset other than the current one."""
-        n, current = len(self.datasets[env]), self.rollouts[env].index if env in self.rollouts else None
-        if current is None or n == 1:
-            return self.rng.randrange(n)
-        return (current + 1 + self.rng.randrange(n - 1)) % n
+        """The window of env's dataset after the current one, cycling; the first one before any."""
+        return (self.rollouts[env].index + 1) % len(self.datasets[env]) if env in self.rollouts else 0
 
     def produce(self) -> Chunk:
-        """Apply the pending commands, then the frames of one step of the current environment (from a random window
-        if it has no rollout). A replay at the end of its recording goes on with a random other window's."""
+        """Apply the pending commands, then the frames of one step of the current environment (from its first window
+        if it has no rollout). A replay at the end of its recording goes on with the next window's."""
         while not self.commands.empty():
             self.apply(self.commands.get())
         env = self.env
@@ -573,6 +570,7 @@ class Demo:
             if self.socket is not socket:
                 return
             self.rng = random.Random()
+            self.env, self.rollouts = self.envs[0], {}  # a new viewer starts on each environment's first clip
             await socket.send_text(json.dumps(self.hello()))
             receiver = asyncio.create_task(self.receive(socket))
             try:
@@ -674,7 +672,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="kyutai/cadre-world-models-2x16x16",
         help="Hub repo id or folder of <environment>/ world models, or a directory of <environment>/<autoencoder>.pt",
     )
-    parser.add_argument("--data", nargs="+", required=True, metavar="ENV=ROOT", help="prompt clips (DATA.md)")
+    parser.add_argument(
+        "--data", nargs="+", metavar="ENV=ROOT", help="prompt clips (DATA.md); default: the demo_clips/ of --weights"
+    )
     parser.add_argument("--manifest", nargs="*", default=[], metavar="ENV=PATH", help="their windows")
     parser.add_argument("--split", default="test", help="the dataset split of the prompt clips")
     parser.add_argument(
@@ -701,7 +701,14 @@ def build(args: argparse.Namespace, checkpoints: dict | None = None) -> Demo:
         pt = {env: Path(args.weights) / env / f"{args.autoencoder}.pt" for env in args.envs}
         checkpoints = {env: path if path.is_file() else f"{args.weights}/{env}" for env, path in pt.items()}
     autoencoder, world_models = load_models(args.autoencoder, checkpoints, device)
-    data, manifests = parse_pairs(args.data), parse_pairs(args.manifest)
+    if args.data:
+        data, manifests = parse_pairs(args.data), parse_pairs(args.manifest)
+    else:  # six clips per environment, shipped with the world models
+        clips = Path(args.weights) / "demo_clips"
+        if not clips.is_dir():
+            clips = Path(snapshot_download(args.weights, allow_patterns=["demo_clips/*"])) / "demo_clips"
+        data = {env: clips / env for env in world_models}
+        manifests = {env: clips / env / "manifest.txt" for env in world_models}
     resolution = autoencoder.config.resolution
     datasets = {
         env: EnvironmentDataset(env, data[env], args.split, CLIP_FRAMES, resolution, manifests.get(env))
