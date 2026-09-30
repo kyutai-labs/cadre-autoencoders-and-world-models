@@ -15,8 +15,9 @@ latents and their KV cache): the page shows the generated frames alone, from the
 A step reads the current action, predicts the next latent with the world model's KV cache (next_latent: denoise_steps
 Euler steps, the new frame cached at context noise), decodes its tau frames as the rollout evaluation streams them (a
 window of latents sliding one latent a step, the decoder's noise an AR(1) buffer), and sends them as JPEG, paced at 20
-fps; the next step runs while they play. All of it under bf16 autocast with fp32 weights, as the rollout evaluation
-runs, compiled with CUDA graphs (a few minutes at startup; --no-compile runs eager, about 2.5x slower). The default
+fps; the next step runs while they play. All of it under bf16 autocast, as the rollout evaluation runs, with the linear
+layers' weights stored in bf16 (autocast would cast them to it on every call: 30% of a step) and the others in fp32,
+compiled with CUDA graphs (a few minutes at startup; --no-compile runs eager, about 2.5x slower). The default
 denoise_steps is the most that keeps real time on an H100 (DENOISE_STEPS).
 
 Actions are per video frame, in each dataset's units, and stay inside the training range. The keys mirror each other
@@ -701,6 +702,11 @@ def build(args: argparse.Namespace, checkpoints: dict | None = None) -> Demo:
         pt = {env: Path(args.weights) / env / f"{args.autoencoder}.pt" for env in args.envs}
         checkpoints = {env: path if path.is_file() else f"{args.weights}/{env}" for env, path in pt.items()}
     autoencoder, world_models = load_models(args.autoencoder, checkpoints, device)
+    if device.type == "cuda":  # the weights autocast runs linear layers with, cast once rather than every call
+        for model in (autoencoder, *world_models.values()):
+            for module in model.modules():
+                if isinstance(module, torch.nn.Linear):
+                    module.to(torch.bfloat16)
     if args.data:
         data, manifests = parse_pairs(args.data), parse_pairs(args.manifest)
     else:  # six clips per environment, shipped with the world models
