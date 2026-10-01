@@ -1,0 +1,29 @@
+# World model for indoor navigation (RealEstate10K camera paths), one recipe for every autoencoder.
+environment: indoor_navigation  # actions: the camera twist, [velocity / scene scale, angular rate in rad/s]
+# The world model derives 10 discrete keys from it and scales it by 100, then, without statistics, clamps it to
+# +-2048 and symlog-squashes it.
+camera_twist: true
+action_mean: null
+action_std: null
+noise_shift: latent_grid  # shift of the flow-time schedule: sqrt(h w C / 4096) of the autoencoder's latent grid
+frames: 80
+psd_fraction: 0.25
+# Optimization, the same in every environment. 100001 steps (0 .. 100000) end with checkpoint-100000.
+steps: 100001
+batch_size: 64
+schedule:
+  lr: 1.0e-4
+  warmup_steps: 1000
+  decay_steps: 0
+betas: [0.9, 0.99]
+weight_decay: 0.1
+grad_clip: 1.0
+ema_decay: 0.9999
+seed: 28
+checkpoint_every: 10000
+keep_recent: 1
+keep_every: null
+log_every: 1000
+eval_every: 2000
+num_workers: 6
+compile: true

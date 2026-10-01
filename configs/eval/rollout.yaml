@@ -1,0 +1,13 @@
+# Rollout evaluation of the world models. Each manifest window: the latents of 40 context frames, then 96 generated
+# frames (10 denoising steps of the linear schedule, context noise 0.2), decoded as the demo streams them. The paper
+# reports decode_steps 1 and, in parentheses, 2 (`--set decode_steps=2`).
+context_frames: 40
+generated_frames: 96
+denoise_steps: 10
+context_noise: 0.2
+decode_steps: 1
+decode_alpha: 0.99
+batch_size: 1
+num_workers: 4
+seed: 0
+compile: true
