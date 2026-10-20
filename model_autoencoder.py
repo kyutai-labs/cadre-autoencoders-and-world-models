@@ -173,15 +173,34 @@ class SpaceTimeBlock(nn.Module):
         self.mlp = SwiGLU(dim)
         self.mlp_ls = LayerScale(dim)
 
-    def forward(self, x: Tensor, rope_space, rope_time, adaln: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        rope_space,
+        rope_time,
+        adaln: Tensor,
+        time_prefix: tuple[Tensor, Tensor] | None = None,
+        return_time_kv: bool = False,
+        last_frames: int | None = None,
+    ) -> Tensor | tuple[Tensor, tuple[Tensor, Tensor]]:
         """x: (B, T, N, C) tokens; adaln: (B, T, N, 6C)."""
         b = x.shape[0]
         m = rearrange(adaln, "b t n (k c) -> k b t n c", k=6) + self.adaln_offset[:, None, None, None, :]
         h = rearrange(self.space_norm(x) * (1 + m[0]) + m[1], "b t n c -> (b t) n c")
         x = x + rearrange(self.space_ls(self.space_attn(h, rope_space)), "(b t) n c -> b t n c", b=b)
         h = rearrange(self.time_norm(x) * (1 + m[2]) + m[3], "b t n c -> (b n) t c")
-        x = x + rearrange(self.time_ls(self.time_attn(h, rope_time)), "(b n) t c -> b t n c", b=b)
-        return x + self.mlp_ls(self.mlp(self.mlp_norm(x) * (1 + m[4]) + m[5]))
+        attended = self.time_attn(h, rope_time, kv_cache=time_prefix, return_kv=return_time_kv)
+        if return_time_kv:
+            attended, time_kv = attended
+        x = x + rearrange(self.time_ls(attended), "(b n) t c -> b t n c", b=b)
+        if last_frames is not None:
+            if not 1 <= last_frames <= x.shape[1]:
+                raise ValueError("last_frames must be between 1 and the block output length")
+            # Only the final decoder block may discard historical outputs:
+            # its attention still consumes every key/value before this slice.
+            x, m = x[:, -last_frames:], m[:, :, -last_frames:]
+        x = x + self.mlp_ls(self.mlp(self.mlp_norm(x) * (1 + m[4]) + m[5]))
+        return (x, time_kv) if return_time_kv else x
 
 
 class RefineHead(nn.Module):
@@ -204,18 +223,34 @@ class RefineHead(nn.Module):
         self.out_norm = nn.GroupNorm(8, dim)
         self.out_conv = nn.Conv2d(dim, out_channels, 3, padding=1)
 
-    def forward(self, x: Tensor, z: Tensor) -> Tensor:
-        """x: (B, T, dim, H, W); z: the latent repeated to the T frames, (B, T, latent_dim, h, w)."""
+    def forward(self, x: Tensor, z: Tensor, last_frames: int | None = None) -> Tensor:
+        """Refine a clip or its suffix while retaining every required causal input frame."""
+        if last_frames is not None and not 1 <= last_frames <= x.shape[1]:
+            raise ValueError("last_frames must be between 1 and the refinement clip length")
         b = x.shape[0]
         # The 1x1 projection commutes with nearest upsampling, so it runs at latent resolution.
         skip = F.interpolate(self.latent_skip(rearrange(z, "b t c h w -> (b t) c h w")), x.shape[-2:], mode="nearest")
         x = x + rearrange(skip, "(b t) c h w -> b t c h w", b=b)
-        for spatial, temporal in zip(self.spatial, self.temporal, strict=True):
+        for index, (spatial, temporal) in enumerate(zip(self.spatial, self.temporal, strict=True)):
             h = spatial(rearrange(x, "b t c h w -> (b t) c h w"))
             x = x + rearrange(h, "(b t) c h w -> b t c h w", b=b)
             h = rearrange(x, "b t c h w -> b c t h w")
-            h = temporal(torch.cat([h[:, :, :1].repeat(1, 1, 2, 1, 1), h], dim=2))  # causal: repeat the first frame
+            if last_frames is None:
+                h = temporal(torch.cat([h[:, :, :1].repeat(1, 1, 2, 1, 1), h], dim=2))
+            else:
+                # Later 3-tap temporal layers need two earlier frames each.
+                # Discard outputs they cannot read, but keep real input history;
+                # repeat the first frame only at the original clip boundary.
+                keep = min(x.shape[1], last_frames + 2 * (len(self.temporal) - index - 1))
+                h = h[:, :, -(keep + 2) :]
+                pad = keep + 2 - h.shape[2]
+                if pad:
+                    h = torch.cat([h[:, :, :1].repeat(1, 1, pad, 1, 1), h], dim=2)
+                h = temporal(h)
+                x = x[:, -keep:]
             x = x + rearrange(h, "b c t h w -> b t c h w")
+        if last_frames is not None:
+            x = x[:, -last_frames:]
         h = self.out_conv(F.silu(self.out_norm(rearrange(x, "b t c h w -> (b t) c h w"))))
         return rearrange(h, "(b t) c h w -> b t c h w", b=b)
 
@@ -308,6 +343,102 @@ class Decoder(nn.Module):
         for layer in (self.patchify, self.adaln_head[1], self.refine_head.latent_skip):
             nn.init.zeros_(layer.weight)
             nn.init.zeros_(layer.bias)
+        self.clear_time_register_cache()
+
+    @property
+    def time_register_cache_ready(self) -> bool:
+        return self._time_register_cache_ready
+
+    def clear_time_register_cache(self) -> None:
+        """Discard the optional inference cache without altering checkpoint parameters."""
+        self._time_register_cache = nn.Module().train(self.training)
+        self._time_register_cache_ready = False
+        self._time_register_cache_grid = None
+        self._time_register_cache_dtype = None
+        self._time_register_cache_device = None
+
+    def train(self, mode: bool = True) -> "Decoder":
+        if mode:
+            self.clear_time_register_cache()
+        return super().train(mode)
+
+    def _apply(self, fn, recurse: bool = True):
+        # Moving/casting cached activations is not equivalent to recomputing them
+        # with moved/cast parameters, so require preparation again afterward.
+        self.clear_time_register_cache()
+        return super()._apply(fn, recurse)
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        self.clear_time_register_cache()
+        return super()._load_from_state_dict(*args, **kwargs)
+
+    @torch.no_grad()
+    def prepare_time_register_cache(
+        self, *, spatial_grid: tuple[int, int] | None = None, input_dtype: torch.dtype | None = None
+    ) -> dict:
+        """Cache the constant temporal prefix after final precision/fusion conversion.
+
+        The cached path applies to eval/no-grad decoding with one temporal
+        register and any number of real latent frames. Training calls retain the
+        original path. Weights must remain immutable after preparation; train(),
+        load_state_dict(), and dtype/device transforms invalidate these buffers.
+
+        Preparation is eager, under matching autocast. The prefix is independent
+        of real frames mathematically, but different GEMM/attention shapes and
+        eager/compiled rounding can change results. Validate matched decoded
+        images before deployment, especially with FP8 or fused projections.
+        """
+        if self.training:
+            raise ValueError("call decoder.eval() before preparing the temporal register cache")
+        if self.time_registers.shape[0] != 1:
+            raise ValueError("temporal register caching requires exactly one temporal register")
+        grid = tuple(size // PATCH for size in self.cfg.resolution) if spatial_grid is None else spatial_grid
+        if len(grid) != 2 or any(type(size) is not int or size < 1 for size in grid):
+            raise ValueError("spatial_grid must contain two positive integers")
+        dtype = self.patchify.weight.dtype if input_dtype is None else input_dtype
+        if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            raise ValueError("input_dtype must be float32, float16, or bfloat16")
+        device = self.time_registers.device
+        self.clear_time_register_cache()
+        head_dim = self.cfg.dim // self.cfg.num_heads
+        rope_space = spatial_rope(*grid, head_dim, device)
+        registers = self.registers.shape[0]
+        cos, sin = rope_space
+        ones = torch.ones(registers, head_dim, device=device, dtype=cos.dtype)
+        rope_space = torch.cat([cos, ones]), torch.cat([sin, torch.zeros_like(ones)])
+        rope_time = temporal_rope(1, head_dim, device)
+        tokens = grid[0] * grid[1] + registers
+        x = self.time_registers.to(dtype)[None, :, None, :].expand(1, 1, tokens, -1).clone()
+        adaln = x.new_zeros(1, 1, tokens, 6 * self.cfg.dim)
+        cache = nn.Module().eval()
+        with torch.autocast(device.type, dtype=dtype, enabled=dtype in (torch.float16, torch.bfloat16)):
+            for index, block in enumerate(self.blocks):
+                # Prefix frames have zero shared modulation, plus the same learned
+                # block offsets as a normal call. Causality prevents every prefix
+                # frame from seeing any real frame in the original computation.
+                x, (k, v) = block(x, rope_space, rope_time, adaln, return_time_kv=True)
+                cache.register_buffer(f"key_{index}", k.detach().clone(), persistent=False)
+                cache.register_buffer(f"value_{index}", v.detach().clone(), persistent=False)
+        self._time_register_cache = cache
+        self._time_register_cache_grid = tuple(grid)
+        self._time_register_cache_dtype = dtype
+        self._time_register_cache_device = device
+        # These lightweight symbolic masks must be created outside torch.compile;
+        # their constructor otherwise graph-breaks on the supported PyTorch 2.8.
+        for block in self.blocks:
+            for frames in range(2, self.cfg.num_frames // self.cfg.tau + 1):
+                block.time_attn.prepare_causal_bias(frames, frames + 1)
+        self._time_register_cache_ready = True
+        return {
+            "ready": True,
+            "layers": len(self.blocks),
+            "spatial_grid": list(grid),
+            "tokens_per_frame": tokens,
+            "input_dtype": str(dtype),
+            "device": str(device),
+            "cached_bytes": sum(tensor.numel() * tensor.element_size() for tensor in cache.buffers()),
+            "preparation": "eager; numerical equivalence requires matched compiled-image validation",
+        }
 
     @property
     def last_layer(self) -> nn.Parameter:
@@ -326,8 +457,11 @@ class Decoder(nn.Module):
         assert x.shape[2] >= grid[0] and x.shape[3] >= grid[1], f"lifted grid {tuple(x.shape[2:4])} < {grid}"
         return x[:, :, : grid[0], : grid[1]]
 
-    def flow_forward(self, z: Tensor, x_t: Tensor, t: Tensor, d: Tensor) -> Tensor:
-        """Predict the clean clip from z and x_t (B, T, 3, H, W); t and d are (B, T_lat), one per latent frame."""
+    def flow_forward(self, z: Tensor, x_t: Tensor, t: Tensor, d: Tensor, last_frames: int | None = None) -> Tensor:
+        """Predict the clean clip, or its last_frames suffix, from z and x_t (B, T, 3, H, W).
+
+        t and d are (B, T_lat), one per latent frame. The full context still enters every transformer block.
+        """
         b, t_lat = z.shape[:2]
         lat = self.lift_latent(z, (x_t.shape[-2] // PATCH, x_t.shape[-1] // PATCH))
         c = torch.cat([timestep_embedding(t.reshape(-1), 128), timestep_embedding(d.reshape(-1), 128)], dim=-1)
@@ -336,9 +470,9 @@ class Decoder(nn.Module):
         patches = rearrange(
             x_t, "b (t pt) c (h p1) (w p2) -> b t h w (c pt p1 p2)", pt=self.cfg.tau, p1=PATCH, p2=PATCH
         )
-        return self.run_trunk(lat + self.patchify(patches), adaln, z)
+        return self.run_trunk(lat + self.patchify(patches), adaln, z, last_frames)
 
-    def run_trunk(self, x: Tensor, adaln: Tensor, z: Tensor) -> Tensor:
+    def run_trunk(self, x: Tensor, adaln: Tensor, z: Tensor, last_frames: int | None = None) -> Tensor:
         tau, head_dim = self.cfg.tau, self.cfg.dim // self.cfg.num_heads
         rescale = self.cfg.rope_spatial_rescale if self.training else None
         _, t, h, w, _ = x.shape
@@ -350,12 +484,36 @@ class Decoder(nn.Module):
         adaln = adaln.repeat_interleave(tau, 1)
         rope_space = spatial_rope(h, w, head_dim, x.device, rescale)
         rope_time = temporal_rope(t * tau, head_dim, x.device)
-        x = self._run_blocks(self.tail_blocks, x, adaln, rope_space, rope_time, registers=False)
+        tail_frames = None if last_frames is None else min(t * tau, last_frames + 2 * len(self.refine_head.temporal))
+        x = self._run_blocks(
+            self.tail_blocks, x, adaln, rope_space, rope_time, registers=False, last_frames=tail_frames
+        )
+        z = z.repeat_interleave(tau, dim=1)
+        if last_frames is not None:
+            if not 1 <= last_frames <= x.shape[1]:
+                raise ValueError("last_frames must be between 1 and the decoded clip length")
+            # Each causal 3-frame refinement convolution reaches two frames back.
+            # Retain the complete receptive field before avoiding unused pixel work;
+            # attention above must still see every frame of the original window.
+            keep = last_frames + 2 * len(self.refine_head.temporal)
+            x, z = x[:, -keep:], z[:, -keep:]
         x = rearrange(self.unpatchify(self.norm_out(x)), "b t h w (c p1 p2) -> b t c (h p1) (w p2)", p1=PATCH, p2=PATCH)
-        return torch.tanh(self.refine_head(x, z.repeat_interleave(tau, dim=1)))
+        x = torch.tanh(self.refine_head(x, z, last_frames=last_frames))
+        return x if last_frames is None else x[:, -last_frames:]
 
-    def _run_blocks(self, blocks, x: Tensor, adaln: Tensor, rope_space, rope_time, registers: bool) -> Tensor:
+    def _run_blocks(
+        self, blocks, x: Tensor, adaln: Tensor, rope_space, rope_time, registers: bool, last_frames: int | None = None
+    ) -> Tensor:
         b, t, h, w, _ = x.shape
+        cached_prefix = (
+            registers
+            and self.time_register_cache_ready
+            and not self.training
+            and not torch.is_grad_enabled()
+            and self._time_register_cache_grid == (h, w)
+            and self._time_register_cache_dtype == x.dtype
+            and self._time_register_cache_device == x.device
+        )
         x = rearrange(x, "b t h w c -> b t (h w) c")
         adaln = rearrange(adaln, "b t h w c -> b t (h w) c")
         if registers:
@@ -366,14 +524,28 @@ class Decoder(nn.Module):
             ones = torch.ones(k, cos.shape[1], device=cos.device, dtype=cos.dtype)
             rope_space = (torch.cat([cos, ones]), torch.cat([sin, torch.zeros_like(ones)]))
             adaln = torch.cat([adaln, adaln.new_zeros(b, t, k, adaln.shape[-1])], dim=2)
-            x = torch.cat([self.time_registers.to(x.dtype)[None, :, None, :].expand(b, kt, x.shape[2], -1), x], dim=1)
-            adaln = torch.cat([adaln.new_zeros(b, kt, adaln.shape[2], adaln.shape[-1]), adaln], dim=1)
-        for block in blocks:
+            if not cached_prefix:
+                x = torch.cat(
+                    [self.time_registers.to(x.dtype)[None, :, None, :].expand(b, kt, x.shape[2], -1), x], dim=1
+                )
+                adaln = torch.cat([adaln.new_zeros(b, kt, adaln.shape[2], adaln.shape[-1]), adaln], dim=1)
+        for index, block in enumerate(blocks):
             if self.training:
                 x = checkpoint(block, x, rope_space, rope_time, adaln, use_reentrant=False)
+            elif cached_prefix:
+                prefix = tuple(
+                    tensor if b == 1 else tensor.repeat(b, 1, 1, 1)
+                    for tensor in (
+                        getattr(self._time_register_cache, f"key_{index}"),
+                        getattr(self._time_register_cache, f"value_{index}"),
+                    )
+                )
+                x = block(x, rope_space, rope_time, adaln, time_prefix=prefix)
+            elif last_frames is not None and index == len(blocks) - 1:
+                x = block(x, rope_space, rope_time, adaln, last_frames=last_frames)
             else:
                 x = block(x, rope_space, rope_time, adaln)
-        if registers:
+        if registers and not cached_prefix:
             x = x[:, kt:]
         return rearrange(x[:, :, : h * w], "b t (h w) c -> b t h w c", h=h)
 
@@ -417,10 +589,14 @@ class CADRE(nn.Module):
         noise: Tensor | None = None,
         out_hw: tuple[int, int] | None = None,
         generator: torch.Generator | None = None,
+        last_frames: int | None = None,
     ) -> Tensor:
         """Sample the clip in decode_steps jumps of equal length from noise (B, T, 3, H, W) ~ N(0, I), drawn here
-        unless given. out_hw: the clip size, needed when it differs from config.resolution. Returns [-1, 1]."""
+        unless given. out_hw: the clip size, needed when it differs from config.resolution. Returns [-1, 1], optionally
+        only last_frames frames. Earlier sampling steps always retain the full clip."""
         b, t_lat = z.shape[:2]
+        if last_frames is not None and not 1 <= last_frames <= t_lat * self.config.tau:
+            raise ValueError("last_frames must be between 1 and the decoded clip length")
         out_h, out_w = out_hw or self.config.resolution
         if noise is None:
             shape = (b, t_lat * self.config.tau, 3, out_h, out_w)
@@ -429,14 +605,31 @@ class CADRE(nn.Module):
         steps = torch.linspace(0.0, 1.0, decode_steps + 1, device=z.device)
         for i in range(decode_steps):
             r, t = steps[i], steps[i + 1]
+            suffix = last_frames if i == decode_steps - 1 else None
             x_hat = self.decoder.flow_forward(
                 z,
                 x,
-                torch.full((b, t_lat), float(r), device=z.device),
-                torch.full((b, t_lat), float(t - r), device=z.device),
+                # Keep schedule scalars on device: float(r) would synchronize CUDA
+                # with the host twice per decoder step.
+                r.expand(b, t_lat),
+                (t - r).expand(b, t_lat),
+                last_frames=suffix,
             )
+            if suffix is not None:
+                x = x[:, -suffix:]
             x = x + ((t - r) / (1 - r)) * (x_hat - x)
         return x
+
+    def decode_tail(
+        self,
+        z: Tensor,
+        decode_steps: int,
+        last_frames: int,
+        noise: Tensor | None = None,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
+        """Sample only a clip's suffix, preserving the full context and sampling trajectory."""
+        return self.decode(z, decode_steps, noise=noise, generator=generator, last_frames=last_frames)
 
     def forward(self, video: Tensor) -> AutoencoderOutputs:
         """Training pass on a uint8 clip: encode it and predict it from x_t, with t ~ U(0, 1) per latent frame."""

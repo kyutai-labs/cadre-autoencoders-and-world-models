@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+from torch.nn.attention.bias import causal_lower_right
 
 
 class SelfAttention(nn.Module):
@@ -31,6 +32,11 @@ class SelfAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.gating = gating
         self.causal = causal
+        # Opt-in decoder inference specialization. This is a runtime policy,
+        # not a parameter/buffer, and does not change checkpoint schemas.
+        self.short_temporal_attention = False
+        self.tiny_temporal_attention = False
+        self._cached_causal_biases = {}
 
         kv_dim = num_kv_heads * self.head_dim
         self.split_sizes = [dim, kv_dim, kv_dim] + ([dim] if gating else [])
@@ -38,6 +44,12 @@ class SelfAttention(nn.Module):
         self.wo = nn.Linear(dim, dim, bias=False)
         self.q_ln = QKLayerNorm((num_heads, self.head_dim))
         self.k_ln = QKLayerNorm((num_kv_heads, self.head_dim))
+
+    def prepare_causal_bias(self, query_length: int, key_length: int) -> None:
+        """Create an optional symbolic mask before compilation, never during forward."""
+        if not 1 < query_length < key_length:
+            raise ValueError("cached causal bias requires 1 < query_length < key_length")
+        self._cached_causal_biases[query_length, key_length] = causal_lower_right(query_length, key_length)
 
     def forward(
         self,
@@ -47,7 +59,7 @@ class SelfAttention(nn.Module):
         return_kv: bool = False,
     ):
         """x: (B, L, dim). kv_cache: past (k, v), each (B, L_past, num_kv_heads, head_dim), prepended to this
-        step's keys. With a cache, rotary_emb covers past + current positions and x is the last position."""
+        step's keys. With a cache, rotary_emb covers past + current positions and x contains the final positions."""
         bsz, seqlen, _ = x.shape
         q, k, v, *gate = self.wqkv(x).split(self.split_sizes, dim=-1)
         q = self.q_ln(q.view(bsz, seqlen, self.num_heads, self.head_dim))
@@ -61,18 +73,82 @@ class SelfAttention(nn.Module):
             v = torch.cat([kv_cache[1], v], dim=1)
 
         if rotary_emb is not None:
-            q_emb = (rotary_emb[0][-1:], rotary_emb[1][-1:]) if kv_cache is not None else rotary_emb
+            q_emb = (rotary_emb[0][-seqlen:], rotary_emb[1][-seqlen:]) if kv_cache is not None else rotary_emb
             q = apply_rotary_emb(q, q_emb)
             k = apply_rotary_emb(k, rotary_emb)
 
         q, k, v = (t.transpose(1, 2) for t in (q, k, v))
-        mask = causal_mask(q.shape[-2], k.shape[-2], x.device) if self.causal else None
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=self.num_kv_heads != self.num_heads)
+        short = (
+            self.short_temporal_attention
+            and self.causal
+            and not self.training
+            and not torch.is_grad_enabled()
+            and self.num_heads == self.num_kv_heads
+            and q.dtype in (torch.float32, torch.float16, torch.bfloat16)
+            and (q.shape[-2], k.shape[-2]) in ((1, 1), (1, 2), (2, 2))
+        )
+        tiny = (
+            self.tiny_temporal_attention
+            and self.causal
+            and q.device.type == "cuda"
+            and not self.training
+            and not torch.is_grad_enabled()
+        )
+        if tiny:
+            from util.tiny_temporal_attention import supports_tiny_temporal_attention, tiny_temporal_attention
+
+            tiny = supports_tiny_temporal_attention(q, k, v)
+        if tiny:
+            y = tiny_temporal_attention(q, k, v)
+        elif short:
+            y = short_causal_attention(q, k, v)
+        else:
+            # Native causality permits fused attention without allocating a mask.
+            # A cached single query is last and can attend every key; is_causal
+            # would incorrectly align it with the first key instead.
+            causal = self.causal and q.shape[-2] == k.shape[-2]
+            mask = None
+            if self.causal and not causal and q.shape[-2] > 1:
+                # A prepared symbolic bias uses Flash's lower-right causal
+                # kernel. Constructing CausalBias here breaks fullgraph on
+                # PyTorch 2.8; unprepared shapes retain the explicit mask.
+                mask = self._cached_causal_biases.get((q.shape[-2], k.shape[-2]))
+                if mask is None:
+                    mask = causal_mask(q.shape[-2], k.shape[-2], x.device)
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, is_causal=causal, enable_gqa=self.num_kv_heads != self.num_heads
+            )
         y = y.transpose(1, 2).reshape(bsz, seqlen, self.dim)
         if self.gating:
             y = y * torch.sigmoid(gate[0])
         y = self.wo(y)
         return (y, new_kv) if return_kv else y
+
+
+def short_causal_attention(q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+    """Causal attention for one/two keys with queries at the final key positions.
+
+    Inputs are (B, H, L, D) with equal Q/K/V head counts. The first of two
+    causal queries can only see v0; the last query sees both keys. FP32 scores,
+    softmax, and weighted values avoid tiny-sequence SDPA kernel overhead when
+    compiled. Casting the result back matches the surrounding attention dtype,
+    but rounding can differ from Flash attention; validate decoded images.
+    """
+    if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+        raise ValueError("short attention expects (batch, heads, length, dim) tensors")
+    if q.shape[:2] != k.shape[:2] or q.shape[-1] != k.shape[-1] or k.shape != v.shape:
+        raise ValueError("short attention requires matching batch, head, and channel dimensions")
+    if q.dtype not in (torch.float32, torch.float16, torch.bfloat16) or q.dtype != k.dtype or k.dtype != v.dtype:
+        raise ValueError("short attention requires matching float32, float16, or bfloat16 dtypes")
+    q_len, k_len = q.shape[-2], k.shape[-2]
+    if (q_len, k_len) not in ((1, 1), (1, 2), (2, 2)):
+        raise ValueError("short attention supports Q/K lengths (1,1), (1,2), or (2,2)")
+    if k_len == 1:
+        return v
+    scores = (q[..., -1:, :].float() * k.float()).sum(dim=-1) * (q.shape[-1] ** -0.5)
+    weights = scores.softmax(dim=-1)
+    last = (weights[..., None] * v.float()).sum(dim=-2, keepdim=True).to(q.dtype)
+    return last if q_len == 1 else torch.cat([v[..., :1, :], last], dim=-2)
 
 
 def causal_mask(q_len: int, k_len: int, device: torch.device) -> Tensor:
@@ -117,8 +193,9 @@ class AdaptiveLayerNorm(nn.Module):
         self.layer_norm = nn.LayerNorm(dim, elementwise_affine=False)
         self.gamma_beta = nn.Linear(cond_dim, 2 * dim)
 
-    def forward(self, x: Tensor, cond: Tensor) -> Tensor:
-        gamma, beta = self.gamma_beta(cond).chunk(2, dim=-1)
+    def forward(self, x: Tensor, cond: Tensor | None, projected: Tensor | None = None) -> Tensor:
+        """Optionally consume this layer's already projected inference conditioning."""
+        gamma, beta = (self.gamma_beta(cond) if projected is None else projected).chunk(2, dim=-1)
         return (1 + gamma) * self.layer_norm(x) + beta
 
 

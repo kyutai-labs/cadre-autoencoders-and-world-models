@@ -7,3 +7,11 @@ outputs/
 wandb/
 *.pth
 *.pt
+
+# Keep local performance experiments out of the release.
+/benchmarks/
+/benchmark_*.py
+
+# Visitor records and their hashing salts stay local.
+*visits.jsonl
+*visits.jsonl.salt

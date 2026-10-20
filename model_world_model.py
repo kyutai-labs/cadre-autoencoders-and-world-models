@@ -115,12 +115,28 @@ class StreamingDecoder:
         decode_steps: int,
         alpha: float,
         generator: torch.Generator | None = None,
+        context_frames: int | None = None,
     ):
-        """z (B, t, h, w, C): the latents so far, whose last ones fill the window."""
+        """z (B, t, h, w, C): the latents so far, whose last ones fill the window.
+
+        A shorter context_frames is an approximate decoding tradeoff. Full latent
+        and noise buffers are retained so it never changes world-model RNG draws.
+        """
         cfg = autoencoder.config
         self.autoencoder, self.decode_steps, self.alpha, self.generator = autoencoder, decode_steps, alpha, generator
+        self.context_frames = self.validate_context_frames(cfg, context_frames)
         self.window = z[:, -(cfg.num_frames // cfg.tau) :]
         self.noise = self._randn()
+
+    @staticmethod
+    def validate_context_frames(config, frames: int | None) -> int:
+        frames = config.num_frames if frames is None else frames
+        if type(frames) is not int or not config.tau <= frames <= config.num_frames or frames % config.tau:
+            raise ValueError(
+                f"decoder_context_frames must be a multiple of tau={config.tau} "
+                f"between {config.tau} and {config.num_frames}"
+            )
+        return frames
 
     def _randn(self) -> Tensor:
         b, n = self.window.shape[:2]
@@ -128,14 +144,25 @@ class StreamingDecoder:
         return torch.randn(shape, generator=self.generator, device=self.window.device, dtype=self.window.dtype)
 
     def decode_window(self) -> Tensor:
-        """The frames of the window's latents, (B, t tau, 3, H, W) in [0, 1]."""
-        z = self.autoencoder.unnormalize(rearrange(self.window, "b t h w c -> b t c h w"))
-        return self.autoencoder.decode(z, self.decode_steps, noise=self.noise) * 0.5 + 0.5
+        """The frames of the selected decoder context, (B, t tau, 3, H, W), in [0, 1]."""
+        z, noise = self.decode_inputs()
+        return self.autoencoder.decode(z, self.decode_steps, noise=noise) * 0.5 + 0.5
+
+    def decode_inputs(self) -> tuple[Tensor, Tensor]:
+        """Slice only model inputs; retained window/noise state and RNG order stay unchanged."""
+        tau = self.autoencoder.config.tau
+        window = self.window[:, -(self.context_frames // tau) :]
+        z = self.autoencoder.unnormalize(rearrange(window, "b t h w c -> b t c h w"))
+        return z, self.noise[:, -window.shape[1] * tau :]
 
     def push(self, z: Tensor) -> Tensor:
         """The frames (B, tau, 3, H, W) in [0, 1] of the next latent z (B, 1, h, w, C)."""
         self.window = torch.cat([self.window[:, 1:], z], dim=1)
         self.noise = self.alpha * self.noise + (1 - self.alpha**2) ** 0.5 * self._randn()
+        decode_tail = getattr(self.autoencoder, "decode_tail", None)
+        if callable(decode_tail):
+            z, noise = self.decode_inputs()
+            return decode_tail(z, self.decode_steps, self.autoencoder.config.tau, noise=noise) * 0.5 + 0.5
         return self.decode_window()[:, -self.autoencoder.config.tau :]
 
 
@@ -330,28 +357,33 @@ class SpaceTimeBlock(nn.Module):
     def forward(
         self,
         x: Tensor,
-        cond: Tensor,
+        cond: Tensor | None,
         time_rope: tuple[Tensor, Tensor],
         space_rope: tuple[Tensor, Tensor],
         kv_cache: tuple[Tensor, Tensor] | None = None,
         return_kv: bool = False,
+        projected_conditioning: tuple[Tensor, ...] | None = None,
     ) -> tuple[Tensor, tuple[Tensor, Tensor] | None]:
         b, t, h, w, _ = x.shape
-        x = rearrange(x, "b t h w c -> (b t) (h w) c")
-        x = x + self.space_attn(self.space_norm(x, rearrange(cond, "b t h w c -> (b t) (h w) c")), space_rope)
+        # Conditioning is constant across a frame's spatial grid. Project its AdaLN
+        # parameters once per frame, then broadcast over x before flattening attention
+        # axes; repeating cond first would repeat the large projection at every pixel.
+        space_params = None if projected_conditioning is None else projected_conditioning[0]
+        y = rearrange(self.space_norm(x, cond, space_params), "b t h w c -> (b t) (h w) c")
+        y = self.space_attn(y, space_rope)
+        x = x + rearrange(y, "(b t) (h w) c -> b t h w c", b=b, t=t, h=h, w=w)
 
         new_kv = None
         if self.time_attn is not None:
-            x = rearrange(x, "(b t) (h w) c -> (b h w) t c", b=b, t=t, h=h, w=w)
-            cond_time = rearrange(cond, "b t h w c -> (b h w) t c")
-            y = self.time_attn(self.time_norm(x, cond_time), time_rope, kv_cache, return_kv)
+            time_params = None if projected_conditioning is None else projected_conditioning[1]
+            y = rearrange(self.time_norm(x, cond, time_params), "b t h w c -> (b h w) t c")
+            y = self.time_attn(y, time_rope, kv_cache, return_kv)
             if return_kv:
                 y, new_kv = y
-            x = rearrange(x + y, "(b h w) t c -> b t h w c", b=b, h=h, w=w)
-        else:
-            x = rearrange(x, "(b t) (h w) c -> b t h w c", b=b, t=t, h=h, w=w)
+            x = x + rearrange(y, "(b h w) t c -> b t h w c", b=b, h=h, w=w)
 
-        return x + self.mlp(self.mlp_norm(x, cond)), new_kv
+        mlp_params = None if projected_conditioning is None else projected_conditioning[-1]
+        return x + self.mlp(self.mlp_norm(x, cond, mlp_params)), new_kv
 
 
 KVCache = list[tuple[Tensor, Tensor] | None]  # one (k, v) per block, None for blocks without time attention
@@ -378,6 +410,8 @@ class WorldModel(nn.Module):
         self.head = nn.Linear(dim, config.latent_channels)
         self.action_encoder = ActionEncoder(config, dim)
         self.rope = RotaryTables(dim // geometry.num_heads)
+        # Inference policy only: keep checkpoint/config schemas unchanged.
+        self.preproject_conditioning = False
         self.apply(init_weights)
 
     def encode_actions(self, actions: Tensor, first: int, n: int) -> Tensor:
@@ -395,25 +429,69 @@ class WorldModel(nn.Module):
         d: Tensor | None = None,
         kv_cache: KVCache | None = None,
         return_kv: bool = False,
+        projected_conditioning: tuple[Tensor, ...] | None = None,
     ) -> Tensor | tuple[Tensor, KVCache]:
         """Predicted velocity (B, T, h, w, C) of latents z at flow times t and jumps d (B, T), given action embeddings a
         (B, T, dim). With a kv_cache of earlier frames, z holds only the newest frame."""
         b, n, h, w, _ = z.shape
         x = self.input_proj(z)
-        t_emb = self.time_embed(t) + self.step_embed(torch.zeros_like(t) if d is None else d)
-        cond = rearrange(a, "b t c -> b t 1 1 c").repeat(1, 1, h, w, 1) + t_emb.repeat(1, 1, h, w, 1)
+        if projected_conditioning is None:
+            t_emb = self.time_embed(t) + self.step_embed(torch.zeros_like(t) if d is None else d)
+            cond = rearrange(a, "b t c -> b t 1 1 c") + t_emb
+        else:
+            if self.training:
+                raise ValueError("preprojected conditioning is an evaluation-only inference policy")
+            cond = None
 
         time_rope = self.rope.time(n if kv_cache is None else n + kv_cache[0][0].shape[1])
         space_rope = self.rope.space(h, w)
-        new_kv = []
+        new_kv, cursor = [], 0
         for i, block in enumerate(self.blocks):
             if self.training and self.config.activation_checkpointing and torch.is_grad_enabled():
                 x, _ = checkpoint(block, x, cond, time_rope, space_rope, use_reentrant=False)
             else:
-                x, kv = block(x, cond, time_rope, space_rope, None if kv_cache is None else kv_cache[i], return_kv)
+                count = 2 + (block.time_norm is not None)
+                params = None if projected_conditioning is None else projected_conditioning[cursor : cursor + count]
+                kwargs = {} if params is None else {"projected_conditioning": params}
+                x, kv = block(
+                    x, cond, time_rope, space_rope, None if kv_cache is None else kv_cache[i], return_kv, **kwargs
+                )
+                cursor += count
                 new_kv.append(kv)
         v = self.head(x)
         return (v, new_kv) if return_kv else v
+
+    def project_schedule_conditioning(
+        self, a: Tensor, noise: Tensor, denoise_steps: int, context_noise: float
+    ) -> tuple[Tensor, ...]:
+        """Project all sampling steps' AdaLN parameters together, without caching action-dependent state.
+
+        Each entry is (steps + 1, B, 1, 1, 1, 2 * hidden_dim), ordered by
+        block's space/time/MLP norms. The last row is the KV context update.
+        Keep each time-embedding GEMM at the original batch shape and round
+        action + time before grouping the projection rows: splitting the two
+        linear terms would change BF16 arithmetic. A different GEMM row count
+        can still change backend rounding, so this remains opt-in inference.
+        """
+        if self.training:
+            raise ValueError("preprojected conditioning is an evaluation-only inference policy")
+        batch = noise.shape[0]
+        times = shift_time(torch.linspace(0, 1.0, denoise_steps + 1, device=noise.device), self.config.noise_shift)
+        conditions = []
+        for t, dt in zip(times[:-1], times[1:] - times[:-1], strict=True):
+            time = t * torch.ones((batch, 1), device=noise.device, dtype=noise.dtype)
+            embedding = self.time_embed(time) + self.step_embed(dt * torch.ones_like(time))
+            conditions.append(rearrange(a, "b t c -> b t 1 1 c") + embedding)
+        time = (1 - context_noise) * torch.ones((batch, 1), device=noise.device, dtype=noise.dtype)
+        embedding = self.time_embed(time) + self.step_embed(torch.zeros_like(time))
+        conditions.append(rearrange(a, "b t c -> b t 1 1 c") + embedding)
+        merged = torch.stack(conditions).flatten(0, 1)
+        return tuple(
+            norm.gamma_beta(merged).unflatten(0, (denoise_steps + 1, batch))
+            for block in self.blocks
+            for norm in (block.space_norm, block.time_norm, block.mlp_norm)
+            if norm is not None
+        )
 
     def forward(self, z: Tensor, actions: Tensor, generator: torch.Generator | None = None) -> dict[str, Tensor]:
         """Training losses on standardized latents z (B, T, h, w, C) of clips with their actions (B, >= T tau - 1,
@@ -517,13 +595,24 @@ class WorldModel(nn.Module):
         renoise)."""
         b = noise.shape[0]
         times = shift_time(torch.linspace(0, 1.0, denoise_steps + 1, device=noise.device), self.config.noise_shift)
+        projected = None
+        if self.preproject_conditioning and not self.training:
+            # The separately compiled projection graph may replay before these
+            # tensors' consumers finish using them; keep independent storage.
+            projected = tuple(
+                value.clone() for value in self.project_schedule_conditioning(a, noise, denoise_steps, context_noise)
+            )
         x = noise
-        for t, dt in zip(times[:-1], times[1:] - times[:-1], strict=True):
+        for index, (t, dt) in enumerate(zip(times[:-1], times[1:] - times[:-1], strict=True)):
             t_k = t * torch.ones((b, 1), device=x.device, dtype=x.dtype)
-            x = x + dt * self.velocity(x, a, t_k, dt * torch.ones_like(t_k), kv_cache=kv)
+            kwargs = {} if projected is None else {"projected_conditioning": tuple(p[index] for p in projected)}
+            x = x + dt * self.velocity(x, a, t_k, dt * torch.ones_like(t_k), kv_cache=kv, **kwargs)
 
         t_ctx = (1 - context_noise) * torch.ones((b, 1, 1, 1, 1), device=x.device, dtype=x.dtype)
-        _, new_kv = self.velocity(t_ctx * x + (1 - t_ctx) * renoise, a, t_ctx.view(b, 1), kv_cache=kv, return_kv=True)
+        kwargs = {} if projected is None else {"projected_conditioning": tuple(p[-1] for p in projected)}
+        _, new_kv = self.velocity(
+            t_ctx * x + (1 - t_ctx) * renoise, a, t_ctx.view(b, 1), kv_cache=kv, return_kv=True, **kwargs
+        )
         kv = [
             None if old is None else tuple(torch.cat([o[:, 1:], n], dim=1) for o, n in zip(old, new, strict=True))
             for old, new in zip(kv, new_kv, strict=True)

@@ -55,6 +55,28 @@ uv run --extra demo python demo.py
 Open http://localhost:8000. The world models and six prompt clips per environment download from the Hub;
 `--data <environment>=<root>` starts the rollouts from your own clips instead ([DATA.md](DATA.md) format).
 
+### Shared GPU serving
+
+The public demo serves all four environments on one H100 with two active users total; additional visitors queue.
+Each user has independent state and random-number generation. This profile keeps seven BF16 world-model steps,
+batch size one, and the full 16-frame decoder history, with FP8 used only for the decoder:
+
+```sh
+uv run --extra demo python demo.py --host 127.0.0.1 --port 8000 \
+  --envs driving robot_manipulation human_manipulation indoor_navigation \
+  --max_active 2 --batch_size 1 --denoise_steps 7 --decoder_context_frames 16 \
+  --fp8 --fp8_fast_accum --fp8_decoder_only --cache_decoder_prefix --tiny_decoder_attention \
+  --preproject_conditioning --fused_swiglu --fused_swiglu_world_model_only --prompt_cache 24 --fixed_settings
+```
+
+Allow several minutes for compilation at startup. For online access, place the local server behind an HTTPS proxy
+with WebSocket support. The page shows the shared active/queued counts and hides the fixed inference settings.
+Noise defaults to **0.35 for driving and indoor navigation (Real Estate)** and **0.20 for robot and human manipulation**.
+
+On the H100, this profile measured about **14 FPS per user with two active users**, with local input p95 of
+**207–212 ms**. One active user measured **20 FPS and 162 ms**. Latency excludes network transit and browser
+rendering; two users do not meet a 19 FPS / 200 ms target. Long rollouts can still drift.
+
 ## Models
 
 All weights are on the Hugging Face Hub, in the

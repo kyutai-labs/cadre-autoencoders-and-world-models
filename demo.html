@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CADRE World Models Experimental Research Demo</title>
+<link rel="icon" type="image/x-icon" href="https://kyutai.org/favicon.ico">
 <link rel="preconnect" href="https://api.fontshare.com">
 <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap">
 <style>
@@ -43,6 +44,19 @@ nav .spacer { flex: 1; }
 .readout { background: none; border: 0; padding: 0; font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; cursor: default; }
 .readout.slow { color: var(--orange); }
 .readout.lost { color: var(--pink); cursor: pointer; }
+.live-status { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; }
+.concurrency { color: var(--green); font-size: 12px; font-variant-numeric: tabular-nums; }
+.concurrency.unavailable { color: var(--muted); }
+.research-links { flex: none; display: flex; justify-content: center; align-items: center; flex-wrap: wrap;
+  gap: 2px 20px; padding: 2px 12px 8px; border-top: 1px solid var(--line); font-size: 13px; }
+.research-links a { display: inline-flex; align-items: center; min-height: 36px; padding: 4px;
+  color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+.research-links a:hover, .research-links a:focus-visible { color: var(--green); }
+@media (max-width: 1100px) { nav .brand span { display: none; } }
+@media (max-width: 620px) {
+  nav { height: auto; min-height: 52px; flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
+  .live-status { flex-basis: 100%; align-items: flex-start; }
+}
 
 main { flex: 1; min-height: 0; width: 100%; max-width: 1760px; margin: 0 auto; padding: 14px 28px 18px;
   display: flex; flex-direction: column; }
@@ -76,6 +90,15 @@ main { flex: 1; min-height: 0; width: 100%; max-width: 1760px; margin: 0 auto; p
 .badge.replay { color: var(--orange); }
 .loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 15px;
   pointer-events: none; }
+/* Before and after a turn: the line's place, or the way back into it, over a dimmed frame. */
+.loading.line { background: rgba(10,10,10,.3); align-content: center; gap: 14px; text-align: center; padding: 0 24px;
+  text-shadow: 0 1px 8px #000; }
+/* Out of one's turn: the current driver's stream, small, blurred and dark, and the controls dimmed (and inert). */
+.stage.blurred { overflow: hidden; }
+.stage.blurred canvas#screen { filter: blur(10px) brightness(.5); transform: scale(1.08); }
+body.queued .tabs, body.queued .panel, body.queued .keys { opacity: .35; transition: opacity .3s; }
+.loading.line .big { color: var(--text); font-size: 22px; }
+.loading.line .btn { pointer-events: auto; flex: none; }
 
 /* key strip */
 .keys { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-top: 12px; padding: 12px 14px; background: var(--surface);
@@ -153,7 +176,11 @@ kbd.down { background: var(--green); color: #000; border-color: var(--green); }
   </div>
   <div class="brand">CADRE <span>World Models Experimental Research Demo</span></div>
   <div class="spacer"></div>
-  <button class="readout sc" id="readout" type="button">connecting</button>
+  <div class="live-status">
+    <div class="concurrency sc unavailable" id="concurrency" role="status" aria-live="polite" aria-atomic="true"
+      title="Active users and queued visitors across all environments sharing this GPU">shared gpu · status unavailable</div>
+    <button class="readout sc" id="readout" type="button">connecting</button>
+  </div>
 </nav>
 
 <main>
@@ -177,19 +204,28 @@ kbd.down { background: var(--green); color: #000; border-color: var(--green); }
         </div>
       </div>
       <div class="card" id="hudcard" hidden><div id="hud"></div></div>
-      <div class="card">
+      <div class="card" id="settingscard" hidden>
         <div class="slider">
           <label class="sc" for="steps">denoise steps</label><output id="stepsv"></output>
           <input type="range" id="steps" min="1" max="10" step="1">
         </div>
         <div class="slider">
           <label class="sc" for="noise">context noise</label><output id="noisev"></output>
-          <input type="range" id="noise" min="0" max="0.5" step="0.05">
+          <input type="range" id="noise" min="0" max="1" step="0.05">
         </div>
       </div>
     </aside>
   </div>
 </main>
+
+<footer class="research-links" aria-label="Research resources">
+  <a href="https://github.com/AdrienRR/cadre-autoencoders-and-world-models" target="_blank" rel="noopener noreferrer"
+    aria-label="Code on GitHub (opens in a new tab)">Code</a>
+  <a href="https://wmoptimal.github.io/" target="_blank" rel="noopener noreferrer"
+    aria-label="World-model examples (opens in a new tab)">Examples</a>
+  <a href="https://kyutai.org/blog/2026-10-07-cadre" target="_blank" rel="noopener noreferrer"
+    aria-label="CADRE blog post (opens in a new tab)">Blog</a>
+</footer>
 
 <script>
 "use strict";
@@ -202,7 +238,7 @@ const KEY_LABELS = { Shift: "shift", Space: "space", Tab: "tab" };
 let socket = null, hello = null, envs = {}, current = null, info = null;
 let held = new Set();  // the environment's keys, sent to the server
 const lit = new Set();  // every key of the strip that is down
-let drawing = Promise.resolve(), chunkEnv = null;
+let drawing = false, pendingFrame = null, chunkEnv = null, chunkInfo = null, renderedInfo = null;
 const shown = [];  // display times of the last frames, for the fps readout
 let latency = null;
 const ctx = $("screen").getContext("2d");
@@ -218,8 +254,23 @@ function send(message) {
 }
 
 // --- connection ---
+// Whether it is someone else's turn (waiting in line, or one's own turn over): the controls do nothing then.
+function setQueued(on) {
+  document.body.classList.toggle("queued", on);
+  $("stage").classList.toggle("blurred", on);
+  for (const id of ["tabs", "panel", "keys"]) $(id).inert = on;
+  if (on) {
+    $("badge").hidden = true;
+    ribbon = [];
+    drawRibbon();
+  }
+}
 function connect() {
+  if (socket && socket.readyState !== WebSocket.CLOSED) return;
+  applyConcurrency(null);
+  setQueued(true);
   setReadout("connecting", "");
+  showLoading("connecting");
   socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   socket.binaryType = "arraybuffer";
   socket.onmessage = (event) => {
@@ -227,22 +278,76 @@ function connect() {
     else onFrame(event.data);
   };
   socket.onclose = (event) => {
-    setReadout(event.code === 4000 ? "another viewer took over" : "disconnected: reconnect", "lost");
+    pendingFrame = null;
+    hello = null;
+    envs = {};
+    applySettings({});
+    applyConcurrency(null);
+    setQueued(true);
+    releaseKeys();
+    if (document.pointerLockElement) document.exitPointerLock();
+    const why = { 4001: "your turn is over", 4002: "the line is full, try again later" }[event.code] || "disconnected";
+    setReadout(`${why}: rejoin`, "lost");
+    showLine(why, "", "join the line again");
   };
+}
+// The overlay of the line: a headline, a detail and, once disconnected, a button that reconnects.
+function showLine(big, detail, button) {
+  const loading = $("loading");
+  loading.hidden = false;
+  loading.className = "loading sc line";
+  loading.innerHTML = `<div class="big"></div><div class="detail"></div>` +
+    (button ? `<div><button class="btn sc" type="button"></button></div>` : "");
+  loading.querySelector(".big").textContent = big;
+  loading.querySelector(".detail").textContent = detail;
+  if (button) {
+    loading.querySelector("button").textContent = button;
+    loading.querySelector("button").addEventListener("click", connect);
+  }
+}
+function showLoading(text) {
+  $("loading").hidden = false;
+  $("loading").className = "loading sc";
+  $("loading").textContent = text;
+}
+function minutes(seconds) {
+  return seconds < 60 ? "under a minute" : `about ${Math.ceil(seconds / 60)} min`;
 }
 function setReadout(text, cls) {
   $("readout").className = "readout sc " + cls;
   $("readout").textContent = text;
 }
-$("readout").addEventListener("click", () => { if (!socket || socket.readyState === WebSocket.CLOSED) connect(); });
+$("readout").addEventListener("click", connect);
+
+function applyConcurrency(snapshot) {
+  const display = $("concurrency");
+  const valid = snapshot && [snapshot.active, snapshot.max_active, snapshot.waiting].every(Number.isInteger) &&
+    snapshot.max_active > 0 && snapshot.active >= 0 && snapshot.active <= snapshot.max_active && snapshot.waiting >= 0;
+  const text = valid ? `shared gpu · ${snapshot.active} / ${snapshot.max_active} active · ${snapshot.waiting} queued`
+    : "shared gpu · status unavailable";
+  if (display.textContent !== text) display.textContent = text;
+  display.classList.toggle("unavailable", !valid);
+  const detail = valid && snapshot.by_env && typeof snapshot.by_env === "object"
+    ? Object.entries(snapshot.by_env).filter(([, count]) => Number.isInteger(count) && count >= 0)
+      .map(([name, count]) => `${envs[name]?.title || name.replaceAll("_", " ")}: ${count}`).join(" · ") : "";
+  display.title = "Active users and queued visitors across all environments sharing this GPU" +
+    (detail ? `\nActive by environment — ${detail}` : "");
+}
 
 function onText(message) {
-  if (message.type === "hello") {
+  if (message.concurrency) applyConcurrency(message.concurrency);
+  if (message.type === "line") {
+    const ahead = message.place - 1;
+    setReadout(`in line: ${message.place} of ${message.length}`, "slow");
+    showLine(ahead ? `${ahead} ${ahead === 1 ? "person" : "people"} ahead of you` : "you are next",
+      `waiting for a shared slot · your turn in ${minutes(message.wait)} at most`);
+  } else if (message.type === "hello") {
+    setQueued(false);
+    showLoading("your turn: starting");
     hello = message;
     envs = Object.fromEntries(message.envs.map((e) => [e.name, e]));
-    $("steps").value = message.denoise_steps;
-    $("noise").value = message.context_noise;
-    showSettings();
+    if (message.concurrency) applyConcurrency(message.concurrency);
+    applySettings(message);
     buildTabs();
     selectEnv(message.env, false);
     setReadout("live", "");
@@ -252,18 +357,50 @@ function onText(message) {
 function onFrame(buffer) {
   const size = new DataView(buffer).getUint32(0, true);
   const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, size)));
-  if (header.i === 0) chunkEnv = header.env;
+  if (header.concurrency) applyConcurrency(header.concurrency);
+  if (header.preview) {  // the current driver's stream, for the line (drawn blurred)
+    if (hello) return;
+    const blob = new Blob([new Uint8Array(buffer, 4 + size)], { type: "image/jpeg" });
+    createImageBitmap(blob).then((bitmap) => { if (!hello) ctx.drawImage(bitmap, 0, 0, 512, 288); bitmap.close(); })
+      .catch(() => {});
+    return;
+  }
+  if (header.i === 0) { chunkEnv = header.env; chunkInfo = header; }
   if (chunkEnv !== current) return;  // still in flight from the environment we left
   const blob = new Blob([new Uint8Array(buffer, 4 + size)], { type: "image/jpeg" });
-  drawing = drawing.then(() => createImageBitmap(blob)).then((bitmap) => {
-    ctx.drawImage(bitmap, 0, 0, 512, 288);
-    bitmap.close();
-    const now = performance.now();
-    shown.push(now);
-    while (shown.length > 40 || now - shown[0] > 2000) shown.shift();
-    if (header.i === 0) applyInfo(header);
-    $("loading").hidden = true;
-  }).catch(() => {});
+  // Keep only the newest pending frame if a browser cannot decode at stream speed.
+  pendingFrame = { blob, info: chunkInfo, env: chunkEnv, connection: socket };
+  if (!drawing) void drawFrames();
+}
+
+async function drawFrames() {
+  drawing = true;
+  try {
+    while (pendingFrame) {
+      const frame = pendingFrame;
+      pendingFrame = null;
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(frame.blob);
+        if (frame.connection !== socket || frame.env !== current || !hello) continue;
+        ctx.drawImage(bitmap, 0, 0, 512, 288);
+        const now = performance.now();
+        shown.push(now);
+        while (shown.length > 40 || now - shown[0] > 2000) shown.shift();
+        if (frame.info && frame.info !== renderedInfo) {
+          applyInfo(frame.info);
+          renderedInfo = frame.info;
+        }
+        $("loading").hidden = true;
+      } catch (_) {
+        // The next frame can still decode after a corrupt image or a closed connection.
+      } finally {
+        if (bitmap) bitmap.close();
+      }
+    }
+  } finally {
+    drawing = false;
+  }
 }
 
 // --- environment ---
@@ -286,6 +423,7 @@ function selectEnv(name, notify) {
   releaseKeys();
   current = name;
   const env = envs[name];
+  applySettings({ context_noise: hello.context_noise_by_env?.[name] ?? env.context_noise });
   for (const tab of $("tabs").children) tab.setAttribute("aria-selected", String(tab.dataset.env === name));
   const modes = $("modes");
   modes.textContent = "";
@@ -307,8 +445,7 @@ function selectEnv(name, notify) {
   if (notify) {
     info = null;
     $("badge").hidden = true;
-    $("loading").hidden = false;
-    $("loading").textContent = "switching";
+    showLoading("switching");
     send({ type: "env", env: name });
   }
 }
@@ -364,6 +501,7 @@ function buildHud(env) {
 function applyInfo(message) {
   if (!message.env || message.env !== current) return;
   info = message;
+  applySettings(message);
   const badge = $("badge");
   badge.hidden = false;
   badge.className = `pill badge sc ${message.mode}`;
@@ -371,7 +509,8 @@ function applyInfo(message) {
   if (message.latency_ms) latency = message.latency_ms;
   const fps = shown.length > 1 ? 1000 * (shown.length - 1) / (shown[shown.length - 1] - shown[0]) : 0;
   const text = `${fps ? fps.toFixed(1) : "–"} fps` + (latency ? ` · ${latency.toFixed(0)} ms latency` : "");
-  setReadout(text, fps && fps < hello.fps * 0.95 ? "slow" : "");
+  const turn = message.turn_left === null ? "" : ` · ${message.turn_left} s left (${message.waiting} waiting)`;
+  setReadout(text + turn, fps && fps < hello.fps * 0.95 ? "slow" : "");
   for (const b of $("modes").children) b.setAttribute("aria-pressed", String(b.dataset.mode === message.mode));
   updateHud(message.hud || {});
 }
@@ -432,12 +571,28 @@ function fitStage() {
 new ResizeObserver(fitStage).observe($("layout"));
 
 // --- settings ---
+function applySettings(message) {
+  const locked = !hello || Boolean(hello.settings_locked);
+  $("settingscard").hidden = locked;
+  for (const id of ["steps", "noise"]) $(id).disabled = locked;
+  const maximum = message.max_denoise_steps ?? hello?.max_denoise_steps ?? hello?.denoise_steps;
+  if (Number.isFinite(maximum)) $("steps").max = maximum;
+  if (hello && message.context_noise_by_env) hello.context_noise_by_env = { ...message.context_noise_by_env };
+  if (hello && Number.isFinite(message.context_noise)) {
+    hello.context_noise_by_env = { ...hello.context_noise_by_env, [message.env || current || hello.env]: message.context_noise };
+  }
+  for (const [id, value] of [["steps", message.denoise_steps], ["noise", message.context_noise]]) {
+    if (Number.isFinite(value) && !$(id).matches(":active")) $(id).value = value;
+  }
+  showSettings();
+}
 function showSettings() {
   $("stepsv").textContent = $("steps").value;
   $("noisev").textContent = Number($("noise").value).toFixed(2);
 }
 for (const id of ["steps", "noise"]) {
   $(id).addEventListener("input", () => {
+    if (!hello || hello.settings_locked) return;
     showSettings();
     send({ type: "settings", denoise_steps: Number($("steps").value), context_noise: Number($("noise").value) });
   });
@@ -445,11 +600,10 @@ for (const id of ["steps", "noise"]) {
 }
 
 // --- buttons ---
-function nextClip() { $("loading").hidden = false; $("loading").textContent = "loading a clip"; send({ type: "next" }); }
+function nextClip() { showLoading("loading a clip"); send({ type: "next" }); }
 function setMode(mode) {
   if (mode === "interactive") { send({ type: "mode", mode }); return; }
-  $("loading").hidden = false;
-  $("loading").textContent = "replaying the clip";
+  showLoading("replaying the clip");
   send({ type: "replay" });
 }
 function toggleMode() { if (info) setMode(info.mode === "interactive" ? "replay" : "interactive"); }
@@ -477,6 +631,8 @@ function releaseKeys() {
 }
 function keyTarget(event) {  // not the focused control's own keys: a slider's arrows, Page and Home / End, a button's Space
   const el = document.activeElement;
+  if (el?.closest(".research-links")) return false;
+  if (event.code === "Tab" && (event.shiftKey || el !== $("stage"))) return false;
   if (el && el.matches("input[type=range]") && /^(Arrow|Page|Home|End)/.test(event.code)) return false;
   if (el && el.matches("button") && event.code === "Space") return false;
   return !(el && el.matches("input[type=text], textarea"));
